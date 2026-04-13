@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAFT Draw</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="bg-orb orb-1" aria-hidden="true"></div>
+  <div class="bg-orb orb-2" aria-hidden="true"></div>
+
+  <div id="loginOverlay" class="login-overlay">
+    <form id="loginForm" class="login-card">
+      <h1>RAFT Draw</h1>
+      <p>Sign in to start collaborating in real time.</p>
+
+      <label for="usernameInput">Username</label>
+      <input id="usernameInput" name="username" type="text" maxlength="24" required placeholder="Sam" />
+
+      <label for="avatarInput">Avatar emoji (optional)</label>
+      <input id="avatarInput" name="avatar" type="text" maxlength="2" placeholder="🙂" />
+
+      <label for="roomInput">Room ID</label>
+      <input id="roomInput" name="room" type="text" maxlength="24" required placeholder="room1" />
+
+      <button type="submit" class="btn-primary">Enter Workspace</button>
+    </form>
+  </div>
+
+  <div id="appShell" class="app-shell hidden">
+    <header class="toolbar" id="toolbar">
+      <div class="title-wrap">
+        <h1>RAFT Draw</h1>
+        <p>Low-latency collaborative whiteboard</p>
+      </div>
+
+      <div class="tool-group">
+        <label for="brushSize">Brush</label>
+        <input id="brushSize" type="range" min="1" max="36" value="6" />
+        <span id="brushValue">6 px</span>
+      </div>
+
+      <div class="tool-group">
+        <label for="brushColor">Color</label>
+        <input id="brushColor" type="color" value="#6ee7ff" />
+      </div>
+
+      <button id="snapBtn" class="btn-neutral" type="button">Snap Grid: Off</button>
+      <button id="undoBtn" class="btn-neutral" type="button">Undo ⬅️</button>
+      <button id="redoBtn" class="btn-neutral" type="button">Redo ➡️</button>
+      <button id="saveBtn" class="btn-neutral" type="button">Save</button>
+      <button id="exportPngBtn" class="btn-neutral" type="button">PNG</button>
+      <button id="exportSvgBtn" class="btn-neutral" type="button">SVG</button>
+      <button id="exportJsonBtn" class="btn-neutral" type="button">JSON</button>
+      <button id="debugToggleBtn" class="btn-neutral" type="button">Debug</button>
+      <button id="clearBtn" class="btn-clear" type="button">Clear</button>
+
+      <div id="status" class="status disconnected">Disconnected</div>
+    </header>
+
+    <aside class="left-sidebar">
+      <h2>Rooms</h2>
+      <ul id="roomList" class="panel-list"></ul>
+    </aside>
+
+    <aside class="right-sidebar">
+      <h2>Users</h2>
+      <div id="identityChip" class="identity-chip">🙂 Guest | Room: room1</div>
+      <div class="stat-card">
+        <span>Active users</span>
+        <strong id="userCount">1</strong>
+      </div>
+      <ul id="userList" class="panel-list"></ul>
+    </aside>
+
+    <section class="ai-panel">
+      <h2>AI Draw Assistant</h2>
+      <p>Try prompts like Draw a tree or Draw a house.</p>
+      <input id="aiPromptInput" type="text" placeholder="Draw a house" />
+      <button id="aiRunBtn" class="btn-primary" type="button">Generate</button>
+    </section>
+
+    <section id="debugPanel" class="debug-panel hidden">
+      <div class="debug-title">Signaling Debug</div>
+      <div id="debugSummary" class="debug-summary"></div>
+      <ul id="debugLogList" class="debug-log"></ul>
+    </section>
+
+    <main class="canvas-stage">
+      <canvas id="drawCanvas"></canvas>
+      <div id="cursorLayer" class="cursor-layer" aria-hidden="true"></div>
+      <div id="networkToast" class="network-toast" role="status" aria-live="polite"></div>
+      <div id="brushPreview" class="brush-preview" aria-hidden="true"></div>
+    </main>
+  </div>
+
+  <script>
+    window.__APP_CONFIG__ = {
+      WS_URL: "wss://raft-gateway.onrender.com"
+    }
+  </script>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

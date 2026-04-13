@@ -1,0 +1,11 @@
+services:
+  - type: web
+    env: node
+    name: raft-gateway
+    buildCommand: npm install
+    startCommand: node gateway.js
+    plan: free
+  - type: static
+    name: raft-frontend
+    buildCommand: ""
+    publishPath: ./frontend
