@@ -5,7 +5,7 @@ services:
     buildCommand: npm install
     startCommand: node gateway.js
     plan: free
-  - type: static
+  - type: static_site
     name: raft-frontend
     buildCommand: ""
     publishPath: ./frontend
