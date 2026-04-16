@@ -13,6 +13,7 @@ const server = http.createServer(app)
 const wss = new WebSocket.Server({ server })
 
 const PORT = process.env.PORT || 4000
+const strictRaftMode = String(process.env.RAFT_STRICT || "").toLowerCase() === "true"
 
 const replicaUrls = (process.env.REPLICA_URLS
   ? process.env.REPLICA_URLS.split(",").map(url => url.trim()).filter(Boolean)
@@ -68,12 +69,6 @@ function getRoomClients(room) {
 
 function broadcastRoom(room, payload, exceptClient = null) {
   getRoomClients(room).forEach(client => {
-    const meta = clientMeta.get(client)
-    const requiresInit = payload && ["draw", "clear", "undo", "redo", "cursor", "ai-draw"].includes(payload.type)
-    if (requiresInit && meta && !meta.initReady) {
-      return
-    }
-
     if (client !== exceptClient) {
       sendToClient(client, payload)
     }
@@ -143,56 +138,42 @@ async function getLeader() {
   return null
 }
 
-async function fetchCommittedEntriesForRoom(room) {
-  const leaderTimeoutMs = 15000
-  const pollIntervalMs = 250
-  const startedAt = Date.now()
-
-  while (Date.now() - startedAt < leaderTimeoutMs) {
-    const leader = await getLeader()
+async function sendInitialState(ws, room = null) {
+  try {
+    let leader = null;
+    for (let i = 0; i < 5; i++) {
+        leader = await getLeader();
+        if (leader) break;
+        await sleep(500);
+    }
+    
     if (!leader) {
-      await sleep(pollIntervalMs)
-      continue
+      console.log(`[Gateway] No leader found for INIT_STATE`);
+      return;
     }
 
-    try {
-      const res = await axios.get(`${leader}/committed-log`, { timeout: 1000 })
-      if (res.data && res.data.success && Array.isArray(res.data.entries)) {
-        const entries = res.data.entries
-          .map(entry => entry && entry.data)
-          .filter(Boolean)
-          .filter(entry => {
-            if (!room) return true
-            const entryRoom = entry.room || (entry.data && entry.data.room)
-            return entryRoom === room
-          })
+    const res = await axios.get(`${leader}/committed-log`);
+    const data = res.data;
 
-        return entries
-      }
-    } catch (err) {
-      console.log("⚠️ Failed to fetch committed log from leader, retrying...")
+    if (ws.readyState === WebSocket.OPEN) {
+      // If a room is specified, we could filter here, but we'll let the client filter for now 
+      // as they have all the room logic.
+      ws.send(JSON.stringify({
+        type: "INIT_STATE",
+        entries: data.entries || []
+      }));
+      console.log(`[Gateway] Sent INIT_STATE (${(data.entries || []).length} entries)`);
     }
-
-    await sleep(pollIntervalMs)
+  } catch (err) {
+    console.error("INIT_STATE failed", err.message);
   }
-
-  return []
-}
-
-async function sendInitState(ws, room) {
-  const entries = await fetchCommittedEntriesForRoom(room)
-  console.log(`Sending INIT_STATE with ${entries.length} entries`)
-  sendToClient(ws, {
-    type: "INIT_STATE",
-    entries
-  })
 }
 
 // -----------------------------
 // Send entry to leader
 // -----------------------------
-async function sendToLeader(data) {
-  const leaderTimeoutMs = 15000
+async function sendToLeader(data, options = {}) {
+  const leaderTimeoutMs = Number(options.leaderTimeoutMs) > 0 ? Number(options.leaderTimeoutMs) : 15000
   const pollIntervalMs = 250
   const startedAt = Date.now()
 
@@ -288,8 +269,7 @@ wss.on("connection", (ws) => {
     userId: clientId,
     room: null,
     user: "Guest",
-    avatar: "🙂",
-    initReady: false
+    avatar: "🙂"
   })
 
   sendToClient(ws, { type: "welcome", clientId })
@@ -307,21 +287,12 @@ wss.on("connection", (ws) => {
           room: typeof data.room === "string" ? data.room : null,
           user: typeof data.user === "string" ? data.user : "Guest",
           avatar: typeof data.avatar === "string" ? data.avatar : "🙂",
-          userId: typeof data.userId === "string" ? data.userId : meta.userId,
-          initReady: false
+          userId: typeof data.userId === "string" ? data.userId : meta.userId
         }
         clientMeta.set(ws, nextMeta)
 
         if (nextMeta.room) {
-          await sendInitState(ws, nextMeta.room)
-        }
-
-        clientMeta.set(ws, {
-          ...nextMeta,
-          initReady: true
-        })
-
-        if (nextMeta.room) {
+          sendInitialState(ws, nextMeta.room);
           broadcastUserList(nextMeta.room)
         }
         broadcastRoomStats()
@@ -329,9 +300,6 @@ wss.on("connection", (ws) => {
       }
 
       if (messageType === "rtc-signal") {
-        const liveMeta = clientMeta.get(ws) || meta
-        if (!liveMeta.initReady) return
-
         const room = data.room || meta.room
         const targetId = data.target
         if (!room || !targetId || !data.signal) return
@@ -352,9 +320,6 @@ wss.on("connection", (ws) => {
 
       // Cursor updates are ephemeral and do not need RAFT persistence.
       if (messageType === "cursor") {
-        const liveMeta = clientMeta.get(ws) || meta
-        if (!liveMeta.initReady) return
-
         const room = data.room || meta.room
         if (!room) return
 
@@ -374,9 +339,6 @@ wss.on("connection", (ws) => {
       if (!opType) return
 
       if (!operationNeedsRaft(opType)) return
-
-      const liveMeta = clientMeta.get(ws) || meta
-      if (!liveMeta.initReady) return
 
       const room = data.room || meta.room
       if (!room) return
@@ -406,33 +368,39 @@ wss.on("connection", (ws) => {
       if (!raftPayload) return
 
       // Send to RAFT leader.
-      const result = await sendToLeader(raftPayload)
+      const result = await sendToLeader(raftPayload, {
+        leaderTimeoutMs: strictRaftMode ? 15000 : 800
+      })
 
-      if (result && result.success) {
-        if (opType === "draw") {
-          broadcastRoom(room, drawPayload)
-        } else if (opType === "clear") {
-          broadcastRoom(room, {
-            type: "clear",
-            ...baseEvent
-          })
-        } else if (opType === "undo") {
-          broadcastRoom(room, {
-            type: "undo",
-            ...baseEvent
-          })
-        } else if (opType === "redo") {
-          broadcastRoom(room, {
-            type: "redo",
-            ...baseEvent
-          })
-        } else if (opType === "ai-draw") {
-          broadcastRoom(room, {
-            type: "ai-draw",
-            ...baseEvent,
-            data: data.data
-          })
-        }
+      const raftCommitted = Boolean(result && result.success)
+      if (!raftCommitted) {
+        console.log("⚠️ RAFT unavailable, operation dropped")
+        return
+      }
+
+      if (opType === "draw") {
+        broadcastRoom(room, drawPayload)
+      } else if (opType === "clear") {
+        broadcastRoom(room, {
+          type: "clear",
+          ...baseEvent
+        })
+      } else if (opType === "undo") {
+        broadcastRoom(room, {
+          type: "undo",
+          ...baseEvent
+        })
+      } else if (opType === "redo") {
+        broadcastRoom(room, {
+          type: "redo",
+          ...baseEvent
+        })
+      } else if (opType === "ai-draw") {
+        broadcastRoom(room, {
+          type: "ai-draw",
+          ...baseEvent,
+          data: data.data
+        })
       }
     } catch (err) {
       console.log("Error handling message:", err.message)

@@ -25,27 +25,59 @@ function formatError(error) {
 }
 
 async function killOldProcesses() {
-  try {
-    await execAsync("pkill -f \"node replica.js\"")
-  } catch (error) {
-    if (error.code !== 1) {
-      console.log(`pkill warning: ${formatError(error)}`)
-    }
-  }
-
-  for (const port of PORTS) {
+  const isWindows = process.platform === "win32"
+  
+  if (isWindows) {
+    console.log("Detecting and killing old node processes on Windows...")
     try {
-      const { stdout } = await execAsync(`lsof -ti tcp:${port}`)
-      const pids = stdout.trim().split(/\s+/).filter(Boolean)
-      for (const pid of pids) {
+      // kill any node process that's running replica.js
+      // We use wmic or taskkill. taskkill /F /IM node.exe is aggressive.
+      // Better to try and find specifically our processes if possible, but for a dev cluster, 
+      // killing node.exe processes that match the script name is safer or just killing by port.
+      
+      for (const port of PORTS) {
         try {
-          process.kill(Number(pid), "SIGKILL")
-        } catch {
-          // Ignore processes that exited between lsof and kill.
+          // Find PID by port on Windows
+          const { stdout } = await execAsync(`netstat -ano | findstr :${port}`)
+          const lines = stdout.trim().split("\n")
+          for (const line of lines) {
+            const parts = line.trim().split(/\s+/)
+            const pid = parts[parts.length - 1]
+            if (pid && !isNaN(pid) && pid !== "0") {
+              console.log(`Killing process ${pid} on port ${port}`)
+              await execAsync(`taskkill /F /PID ${pid}`)
+            }
+          }
+        } catch (e) {
+          // findstr returns non-zero if not found
         }
       }
-    } catch {
-      // lsof may not be available or no process may be bound; ignore.
+    } catch (error) {
+      console.log(`Process cleanup warning: ${error.message}`)
+    }
+  } else {
+    try {
+      await execAsync("pkill -f \"node replica.js\"")
+    } catch (error) {
+      if (error.code !== 1) {
+        console.log(`pkill warning: ${formatError(error)}`)
+      }
+    }
+
+    for (const port of PORTS) {
+      try {
+        const { stdout } = await execAsync(`lsof -ti tcp:${port}`)
+        const pids = stdout.trim().split(/\s+/).filter(Boolean)
+        for (const pid of pids) {
+          try {
+            process.kill(Number(pid), "SIGKILL")
+          } catch {
+            // Ignore processes that exited between lsof and kill.
+          }
+        }
+      } catch {
+        // lsof may not be available or no process may be bound; ignore.
+      }
     }
   }
 }

@@ -3,7 +3,7 @@ import { RTCMesh } from "./rtc.js"
 
 const WS_URL =
   window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
-    ? "ws://localhost:3000"
+    ? "ws://localhost:4000"
     : "wss://raft-gateway.onrender.com"
 
 const loginOverlay = document.getElementById("loginOverlay")
@@ -295,59 +295,46 @@ function drawRemote(data) {
 }
 
 function handleRemoteDrawMessage(payload) {
-  drawStroke(payload)
-}
-
-function clearCanvas() {
-  state.history = []
-  state.redoStack = []
-  state.seenEvents.clear()
-  redrawCanvas()
-}
-
-function drawStroke(payload) {
-  const room = payload && (payload.room || (payload.data && payload.data.room))
+  const room = payload.room || (payload.data && payload.data.room)
   if (room !== state.session.room) return
 
-  const stroke = parseIncomingStroke(payload)
-  if (!stroke) return
-  if (hasSeen(stroke.id)) return
+  console.log("Receiving:", payload)
 
-  markSeen(stroke.id)
-  state.history.push(stroke)
-  draw(stroke)
-}
-
-function replayInitState(entries = []) {
-  clearCanvas()
-
-  entries.forEach(entry => {
-    if (!entry) return
-    const entryRoom = entry.room || (entry.data && entry.data.room)
-    if (entryRoom !== state.session.room) return
-
-    if (entry.type === "draw") {
-      drawStroke(entry)
-      return
+  if (payload.data) {
+    if (Array.isArray(payload.data.points) && payload.data.points.length > 1) {
+      state.history.push({
+        id: payload.eventId || createId(),
+        kind: "stroke",
+        user: payload.user,
+        avatar: payload.avatar,
+        userId: payload.userId,
+        color: payload.data.color,
+        size: payload.data.size,
+        points: payload.data.points
+      })
+    } else if (
+      typeof payload.data.x === "number" &&
+      typeof payload.data.y === "number" &&
+      typeof payload.data.lastX === "number" &&
+      typeof payload.data.lastY === "number"
+    ) {
+      state.history.push({
+        id: payload.eventId || createId(),
+        kind: "stroke",
+        user: payload.user,
+        avatar: payload.avatar,
+        userId: payload.userId,
+        color: payload.data.color,
+        size: payload.data.size,
+        points: [
+          { x: payload.data.lastX, y: payload.data.lastY },
+          { x: payload.data.x, y: payload.data.y }
+        ]
+      })
     }
+  }
 
-    if (entry.type === "clear") {
-      if (entry.eventId) markSeen(entry.eventId)
-      applyClear({ broadcast: false })
-      return
-    }
-
-    if (entry.type === "undo") {
-      if (entry.eventId) markSeen(entry.eventId)
-      handleUndo({ broadcast: false, data: entry.data })
-      return
-    }
-
-    if (entry.type === "redo") {
-      if (entry.eventId) markSeen(entry.eventId)
-      handleRedo({ broadcast: false, data: entry.data })
-    }
-  })
+  drawRemote(payload.data)
 }
 
 function draw(action) {
@@ -401,6 +388,13 @@ function wsEnvelope(payload) {
 
 function broadcastOperation(operation) {
   console.log("Sending:", operation.data || operation)
+  
+  if (operation.eventId) {
+    markSeen(operation.eventId)
+  }
+
+  // RTC drawing is disabled to ensure strict RAFT consistency (Committed only)
+  /*
   const rtcDelivered = state.rtc
     ? state.rtc.broadcast({ type: "rtc-draw", room: state.session.room, payload: operation })
     : false
@@ -411,6 +405,7 @@ function broadcastOperation(operation) {
       pushDebugLog(`RTC -> ${operation.type}`)
     }
   }
+  */
 
   state.debug.drawViaWs += 1
   sendWs(wsEnvelope(operation))
@@ -654,11 +649,16 @@ function scheduleReconnect() {
 
 function handleIncomingOperation(payload, source = "ws") {
   if (!payload || payload.room !== state.session.room) return
-  if (hasSeen(payload.eventId)) return
-  markSeen(payload.eventId)
+  
+  // Robust eventId detection
+  const eventId = payload.eventId || (payload.data && payload.data.id) || payload.id;
+  if (!eventId) return;
+
+  if (hasSeen(eventId)) return
+  markSeen(eventId)
 
   if (payload.type === "draw") {
-    drawStroke(payload)
+    handleRemoteDrawMessage(payload)
   } else if (payload.type === "clear") {
     applyClear({ broadcast: false })
   } else if (payload.type === "undo") {
@@ -753,11 +753,6 @@ function connectSocket() {
         return
       }
 
-      if (payload.type === "INIT_STATE") {
-        replayInitState(Array.isArray(payload.entries) ? payload.entries : [])
-        return
-      }
-
       if (payload.type === "room-stats") {
         renderRooms(payload.rooms || [])
         return
@@ -781,9 +776,29 @@ function connectSocket() {
         return
       }
 
+      if (payload.type === "INIT_STATE") {
+        console.log("Loading initial state", payload.entries.length);
+        
+        // Clear local state before applying initial state
+        state.history = [];
+        state.redoStack = [];
+        state.seenEvents.clear();
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+        for (const entry of payload.entries) {
+          if (entry && entry.data) {
+            handleIncomingOperation(entry.data, "initial");
+          }
+        }
+        return;
+      }
+
       if (["draw", "clear", "undo", "redo"].includes(payload.type)) {
+        if (payload.type === "draw") {
+          handleRemoteDrawMessage(payload)
+          return
+        }
         handleIncomingOperation(payload, "ws")
-        return
       }
     } catch {
       // Ignore malformed messages.
@@ -840,7 +855,6 @@ function endStroke() {
     }
 
     pushHistory(action)
-    markSeen(action.id)
 
     // Send an authoritative full-stroke payload to keep all clients in sync.
     broadcastOperation({

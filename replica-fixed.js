@@ -5,12 +5,11 @@ const app = express()
 app.use(express.json())
 
 // ===== CONFIG =====
-const PORT = String(process.argv[2] || process.env.PORT || "5001")
-const ID = String(process.env.REPLICA_ID || PORT)
+const PORT = process.argv[2]
+const ID = PORT
 
-const peersEnv = process.env.REPLICA_PEERS || process.env.PEERS
-const peerUrls = peersEnv
-  ? peersEnv.split(",").map(url => url.trim()).filter(Boolean)
+const peerUrls = process.env.REPLICA_PEERS
+  ? process.env.REPLICA_PEERS.split(",").map(url => url.trim()).filter(Boolean)
   : [
     "http://localhost:5001",
     "http://localhost:5002",
@@ -39,7 +38,7 @@ let catchupInFlight = {}
 let electionTimeout = null
 let heartbeatInterval = null
 
-console.log(`[Replica ${PORT}] Starting node (id=${ID})`)
+console.log(`[Replica ${PORT}] Starting node`)
 setTimeout(() => {
   resetElectionTimer()
 }, Math.random() * 15 + 10)
@@ -62,10 +61,6 @@ function applyCommittedEntries() {
       console.log(`[Replica ${PORT}][Term ${currentTerm}] Applied committed entry index ${lastApplied}`)
     }
   }
-}
-
-function getCommittedEntries() {
-  return log.slice(0, commitIndex + 1);
 }
 
 function resetElectionTimer() {
@@ -543,13 +538,6 @@ app.post("/add-entry", async (req, res) => {
   }
 
   return res.json(result)
-})
-
-app.get("/committed-log", (req, res) => {
-  res.json({
-    success: true,
-    entries: getCommittedEntries()
-  });
 })
 
 app.get("/log-state", (req, res) => {
