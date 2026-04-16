@@ -22,9 +22,30 @@ const replicaUrls = (process.env.REPLICA_URLS
     "http://localhost:5003"
   ])
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
 // Store connected clients and metadata.
 const clients = new Set()
 const clientMeta = new Map()
+
+function removeClient(client, reason = "disconnect") {
+  if (!clients.has(client)) return
+
+  const meta = clientMeta.get(client)
+  clients.delete(client)
+  clientMeta.delete(client)
+
+  if (meta && meta.room) {
+    broadcastUserList(meta.room)
+  }
+  broadcastRoomStats()
+
+  if (reason) {
+    console.log(`Client removed: ${reason}`)
+  }
+}
 
 function sendToClient(client, payload) {
   if (client.readyState === WebSocket.OPEN) {
@@ -47,6 +68,12 @@ function getRoomClients(room) {
 
 function broadcastRoom(room, payload, exceptClient = null) {
   getRoomClients(room).forEach(client => {
+    const meta = clientMeta.get(client)
+    const requiresInit = payload && ["draw", "clear", "undo", "redo", "cursor", "ai-draw"].includes(payload.type)
+    if (requiresInit && meta && !meta.initReady) {
+      return
+    }
+
     if (client !== exceptClient) {
       sendToClient(client, payload)
     }
@@ -76,11 +103,13 @@ function getUserList(room) {
 function broadcastUserList(room) {
   if (!room) return
 
+  const users = getUserList(room)
+
   broadcastRoom(room, {
     type: "user-list",
     room,
-    users: getUserList(room),
-    count: getUserList(room).length
+    users,
+    count: users.length
   })
 }
 
@@ -114,41 +143,82 @@ async function getLeader() {
   return null
 }
 
+async function fetchCommittedEntriesForRoom(room) {
+  const leaderTimeoutMs = 15000
+  const pollIntervalMs = 250
+  const startedAt = Date.now()
+
+  while (Date.now() - startedAt < leaderTimeoutMs) {
+    const leader = await getLeader()
+    if (!leader) {
+      await sleep(pollIntervalMs)
+      continue
+    }
+
+    try {
+      const res = await axios.get(`${leader}/committed-log`, { timeout: 1000 })
+      if (res.data && res.data.success && Array.isArray(res.data.entries)) {
+        const entries = res.data.entries
+          .map(entry => entry && entry.data)
+          .filter(Boolean)
+          .filter(entry => {
+            if (!room) return true
+            const entryRoom = entry.room || (entry.data && entry.data.room)
+            return entryRoom === room
+          })
+
+        return entries
+      }
+    } catch (err) {
+      console.log("⚠️ Failed to fetch committed log from leader, retrying...")
+    }
+
+    await sleep(pollIntervalMs)
+  }
+
+  return []
+}
+
+async function sendInitState(ws, room) {
+  const entries = await fetchCommittedEntriesForRoom(room)
+  console.log(`Sending INIT_STATE with ${entries.length} entries`)
+  sendToClient(ws, {
+    type: "INIT_STATE",
+    entries
+  })
+}
+
 // -----------------------------
 // Send entry to leader
 // -----------------------------
 async function sendToLeader(data) {
-  let leader = await getLeader()
+  const leaderTimeoutMs = 15000
+  const pollIntervalMs = 250
+  const startedAt = Date.now()
 
-  if (!leader) {
-    console.log("❌ No leader found, bypassing RAFT for deployment.")
-    return { success: true }
-  }
+  while (Date.now() - startedAt < leaderTimeoutMs) {
+    const leader = await getLeader()
 
-  try {
-    const res = await axios.post(
-      `${leader}/add-entry`,
-      data,
-      { timeout: 1000 }
-    )
-    return res.data
-  } catch (err) {
-    console.log("⚠️ Leader failed, retrying...")
-    
-    // Retry once after re-detecting leader
-    leader = await getLeader()
-    if (!leader) return { success: true }
+    if (!leader) {
+      await sleep(pollIntervalMs)
+      continue
+    }
 
     try {
       const res = await axios.post(
         `${leader}/add-entry`,
-        data
+        data,
+        { timeout: 1000 }
       )
       return res.data
-    } catch {
-      return { success: true }
+    } catch (err) {
+      console.log("⚠️ Leader failed, retrying...")
+      await sleep(pollIntervalMs)
     }
   }
+
+  console.log("❌ No leader available after retry window")
+  return { success: false, error: "No leader available" }
 }
 
 function normalizeDrawMessage(raw, meta) {
@@ -206,6 +276,11 @@ function getMessageType(data) {
 wss.on("connection", (ws) => {
   console.log("🟢 Client connected")
 
+  ws.isAlive = true
+  ws.on("pong", () => {
+    ws.isAlive = true
+  })
+
   clients.add(ws)
   const clientId = crypto.randomUUID()
   clientMeta.set(ws, {
@@ -213,7 +288,8 @@ wss.on("connection", (ws) => {
     userId: clientId,
     room: null,
     user: "Guest",
-    avatar: "🙂"
+    avatar: "🙂",
+    initReady: false
   })
 
   sendToClient(ws, { type: "welcome", clientId })
@@ -231,9 +307,19 @@ wss.on("connection", (ws) => {
           room: typeof data.room === "string" ? data.room : null,
           user: typeof data.user === "string" ? data.user : "Guest",
           avatar: typeof data.avatar === "string" ? data.avatar : "🙂",
-          userId: typeof data.userId === "string" ? data.userId : meta.userId
+          userId: typeof data.userId === "string" ? data.userId : meta.userId,
+          initReady: false
         }
         clientMeta.set(ws, nextMeta)
+
+        if (nextMeta.room) {
+          await sendInitState(ws, nextMeta.room)
+        }
+
+        clientMeta.set(ws, {
+          ...nextMeta,
+          initReady: true
+        })
 
         if (nextMeta.room) {
           broadcastUserList(nextMeta.room)
@@ -243,6 +329,9 @@ wss.on("connection", (ws) => {
       }
 
       if (messageType === "rtc-signal") {
+        const liveMeta = clientMeta.get(ws) || meta
+        if (!liveMeta.initReady) return
+
         const room = data.room || meta.room
         const targetId = data.target
         if (!room || !targetId || !data.signal) return
@@ -263,6 +352,9 @@ wss.on("connection", (ws) => {
 
       // Cursor updates are ephemeral and do not need RAFT persistence.
       if (messageType === "cursor") {
+        const liveMeta = clientMeta.get(ws) || meta
+        if (!liveMeta.initReady) return
+
         const room = data.room || meta.room
         if (!room) return
 
@@ -282,6 +374,9 @@ wss.on("connection", (ws) => {
       if (!opType) return
 
       if (!operationNeedsRaft(opType)) return
+
+      const liveMeta = clientMeta.get(ws) || meta
+      if (!liveMeta.initReady) return
 
       const room = data.room || meta.room
       if (!room) return
@@ -346,21 +441,68 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     console.log("🔴 Client disconnected")
-    const meta = clientMeta.get(ws)
-    clients.delete(ws)
-    clientMeta.delete(ws)
-
-    if (meta && meta.room) {
-      broadcastUserList(meta.room)
-    }
-    broadcastRoomStats()
+    removeClient(ws, "socket close")
   })
+
+  ws.on("error", () => {
+    removeClient(ws, "socket error")
+  })
+})
+
+const wsHeartbeatTimer = setInterval(() => {
+  clients.forEach(client => {
+    if (client.isAlive === false) {
+      removeClient(client, "heartbeat timeout")
+      client.terminate()
+      return
+    }
+
+    client.isAlive = false
+    try {
+      client.ping()
+    } catch {
+      removeClient(client, "heartbeat ping failure")
+      client.terminate()
+    }
+  })
+}, 15000)
+
+wss.on("close", () => {
+  clearInterval(wsHeartbeatTimer)
 })
 
 // -----------------------------
 // Static frontend
 // -----------------------------
 app.use(express.static(path.join(__dirname, "frontend")))
+
+app.get("/", (req, res) => {
+  res
+    .status(200)
+    .type("html")
+    .send(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mini-RAFT Gateway</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; padding: 40px; background: #0f172a; color: #e2e8f0; }
+    .card { max-width: 720px; margin: 0 auto; background: #111827; border: 1px solid #334155; border-radius: 16px; padding: 28px; }
+    a { color: #38bdf8; }
+    code { background: #1e293b; padding: 2px 6px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Mini-RAFT Gateway</h1>
+    <p>This service is a WebSocket gateway, not the main app page.</p>
+    <p>Open the frontend here: <a href="https://raft-frontend.onrender.com">https://raft-frontend.onrender.com</a></p>
+    <p>Health check: <code>/health</code></p>
+  </div>
+</body>
+</html>`)
+})
 
 // -----------------------------
 // Health check

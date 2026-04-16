@@ -77,13 +77,6 @@
       <ul id="userList" class="panel-list"></ul>
     </aside>
 
-    <section class="ai-panel">
-      <h2>AI Draw Assistant</h2>
-      <p>Try prompts like Draw a tree or Draw a house.</p>
-      <input id="aiPromptInput" type="text" placeholder="Draw a house" />
-      <button id="aiRunBtn" class="btn-primary" type="button">Generate</button>
-    </section>
-
     <section id="debugPanel" class="debug-panel hidden">
       <div class="debug-title">Signaling Debug</div>
       <div id="debugSummary" class="debug-summary"></div>
@@ -98,11 +91,6 @@
     </main>
   </div>
 
-  <script>
-    window.__APP_CONFIG__ = {
-      WS_URL: "wss://raft-gateway.onrender.com"
-    }
-  </script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

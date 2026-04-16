@@ -1,8 +1,10 @@
 import { initAuth } from "./auth.js"
 import { RTCMesh } from "./rtc.js"
-import { generateAIDrawing } from "./ai.js"
 
-const WS_URL = (window.__APP_CONFIG__ && window.__APP_CONFIG__.WS_URL) || "wss://raft-gateway.onrender.com"
+const WS_URL =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "ws://localhost:3000"
+    : "wss://raft-gateway.onrender.com"
 
 const loginOverlay = document.getElementById("loginOverlay")
 const appShell = document.getElementById("appShell")
@@ -25,8 +27,6 @@ const exportSvgBtn = document.getElementById("exportSvgBtn")
 const exportJsonBtn = document.getElementById("exportJsonBtn")
 const debugToggleBtn = document.getElementById("debugToggleBtn")
 const clearBtn = document.getElementById("clearBtn")
-const aiPromptInput = document.getElementById("aiPromptInput")
-const aiRunBtn = document.getElementById("aiRunBtn")
 const statusEl = document.getElementById("status")
 const userCountEl = document.getElementById("userCount")
 const identityChip = document.getElementById("identityChip")
@@ -295,46 +295,59 @@ function drawRemote(data) {
 }
 
 function handleRemoteDrawMessage(payload) {
-  const room = payload.room || (payload.data && payload.data.room)
+  drawStroke(payload)
+}
+
+function clearCanvas() {
+  state.history = []
+  state.redoStack = []
+  state.seenEvents.clear()
+  redrawCanvas()
+}
+
+function drawStroke(payload) {
+  const room = payload && (payload.room || (payload.data && payload.data.room))
   if (room !== state.session.room) return
 
-  console.log("Receiving:", payload)
+  const stroke = parseIncomingStroke(payload)
+  if (!stroke) return
+  if (hasSeen(stroke.id)) return
 
-  if (payload.data) {
-    if (Array.isArray(payload.data.points) && payload.data.points.length > 1) {
-      state.history.push({
-        id: payload.eventId || createId(),
-        kind: "stroke",
-        user: payload.user,
-        avatar: payload.avatar,
-        userId: payload.userId,
-        color: payload.data.color,
-        size: payload.data.size,
-        points: payload.data.points
-      })
-    } else if (
-      typeof payload.data.x === "number" &&
-      typeof payload.data.y === "number" &&
-      typeof payload.data.lastX === "number" &&
-      typeof payload.data.lastY === "number"
-    ) {
-      state.history.push({
-        id: payload.eventId || createId(),
-        kind: "stroke",
-        user: payload.user,
-        avatar: payload.avatar,
-        userId: payload.userId,
-        color: payload.data.color,
-        size: payload.data.size,
-        points: [
-          { x: payload.data.lastX, y: payload.data.lastY },
-          { x: payload.data.x, y: payload.data.y }
-        ]
-      })
+  markSeen(stroke.id)
+  state.history.push(stroke)
+  draw(stroke)
+}
+
+function replayInitState(entries = []) {
+  clearCanvas()
+
+  entries.forEach(entry => {
+    if (!entry) return
+    const entryRoom = entry.room || (entry.data && entry.data.room)
+    if (entryRoom !== state.session.room) return
+
+    if (entry.type === "draw") {
+      drawStroke(entry)
+      return
     }
-  }
 
-  drawRemote(payload.data)
+    if (entry.type === "clear") {
+      if (entry.eventId) markSeen(entry.eventId)
+      applyClear({ broadcast: false })
+      return
+    }
+
+    if (entry.type === "undo") {
+      if (entry.eventId) markSeen(entry.eventId)
+      handleUndo({ broadcast: false, data: entry.data })
+      return
+    }
+
+    if (entry.type === "redo") {
+      if (entry.eventId) markSeen(entry.eventId)
+      handleRedo({ broadcast: false, data: entry.data })
+    }
+  })
 }
 
 function draw(action) {
@@ -645,7 +658,7 @@ function handleIncomingOperation(payload, source = "ws") {
   markSeen(payload.eventId)
 
   if (payload.type === "draw") {
-    handleRemoteDrawMessage(payload)
+    drawStroke(payload)
   } else if (payload.type === "clear") {
     applyClear({ broadcast: false })
   } else if (payload.type === "undo") {
@@ -740,6 +753,11 @@ function connectSocket() {
         return
       }
 
+      if (payload.type === "INIT_STATE") {
+        replayInitState(Array.isArray(payload.entries) ? payload.entries : [])
+        return
+      }
+
       if (payload.type === "room-stats") {
         renderRooms(payload.rooms || [])
         return
@@ -763,12 +781,9 @@ function connectSocket() {
         return
       }
 
-      if (["draw", "clear", "undo", "redo", "ai-draw"].includes(payload.type)) {
-        if (payload.type === "draw") {
-          handleRemoteDrawMessage(payload)
-          return
-        }
+      if (["draw", "clear", "undo", "redo"].includes(payload.type)) {
         handleIncomingOperation(payload, "ws")
+        return
       }
     } catch {
       // Ignore malformed messages.
@@ -825,6 +840,7 @@ function endStroke() {
     }
 
     pushHistory(action)
+    markSeen(action.id)
 
     // Send an authoritative full-stroke payload to keep all clients in sync.
     broadcastOperation({
@@ -836,39 +852,6 @@ function endStroke() {
 
   state.currentStroke = []
   state.lastPoint = null
-}
-
-function runAIDraw() {
-  const prompt = aiPromptInput.value.trim()
-  if (!prompt) return
-
-  const actions = generateAIDrawing(prompt, {
-    originX: canvas.clientWidth * 0.35,
-    originY: canvas.clientHeight * 0.3,
-    color: state.brushColor,
-    size: Math.max(2, state.brushSize - 1)
-  })
-
-  actions.forEach(raw => {
-    const action = {
-      id: createId(),
-      kind: "stroke",
-      userId: state.selfId,
-      user: `${state.session.username} (AI)`,
-      avatar: "🤖",
-      color: raw.color,
-      size: raw.size,
-      points: raw.points
-    }
-
-    state.history.push(action)
-    draw(action)
-    markSeen(action.id)
-    broadcastOperation({ type: "draw", eventId: action.id, data: action })
-  })
-
-  aiPromptInput.value = ""
-  showToast("AI sketch generated.", "connected", 1100)
 }
 
 function bindUI() {
@@ -895,7 +878,6 @@ function bindUI() {
   exportPngBtn.addEventListener("click", exportPng)
   exportSvgBtn.addEventListener("click", exportSvg)
   exportJsonBtn.addEventListener("click", exportJson)
-  aiRunBtn.addEventListener("click", runAIDraw)
   debugToggleBtn.addEventListener("click", () => {
     state.debugVisible = !state.debugVisible
     debugPanel.classList.toggle("hidden", !state.debugVisible)

@@ -20,6 +20,11 @@ let ws = null
 let reconnectTimer = null
 let toastTimer = null
 
+const WS_URL =
+  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+    ? "ws://localhost:3000"
+    : "wss://raft-gateway.onrender.com"
+
 const username = (window.prompt("Enter your name", "Guest") || "Guest").trim() || "Guest"
 const roomId = (window.prompt("Enter room ID", "room1") || "room1").trim() || "room1"
 identityText.textContent = `👤 ${username} | Room: ${roomId}`
@@ -102,9 +107,13 @@ function sendPayload(payload) {
 }
 
 function connectSocket() {
-  ws = new WebSocket("wss://raft-gateway.onrender.com")
+  ws = new WebSocket(WS_URL)
 
   ws.addEventListener("open", () => {
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
     setStatus(true)
     sendPayload({ type: "join" })
     showToast("Back online. Sync restored.", "connected", 1300)
@@ -113,7 +122,12 @@ function connectSocket() {
   ws.addEventListener("close", () => {
     setStatus(false)
     showToast("Connection lost. Reconnecting...", "warning")
-    scheduleReconnect()
+    console.log("Reconnecting...")
+    if (reconnectTimer) return
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      connectSocket()
+    }, 1000)
   })
 
   ws.addEventListener("error", () => {
@@ -162,17 +176,6 @@ function connectSocket() {
       console.error("Invalid WS message:", error)
     }
   })
-}
-
-function scheduleReconnect() {
-  if (reconnectTimer) return
-
-  showToast("Attempting reconnect...", "warning")
-
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null
-    connectSocket()
-  }, 1200)
 }
 
 function pointFromEvent(event) {

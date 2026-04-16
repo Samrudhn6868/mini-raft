@@ -5,11 +5,12 @@ const app = express()
 app.use(express.json())
 
 // ===== CONFIG =====
-const PORT = process.argv[2]
-const ID = PORT
+const PORT = String(process.argv[2] || process.env.PORT || "5001")
+const ID = String(process.env.REPLICA_ID || PORT)
 
-const peerUrls = process.env.REPLICA_PEERS
-  ? process.env.REPLICA_PEERS.split(",").map(url => url.trim()).filter(Boolean)
+const peersEnv = process.env.REPLICA_PEERS || process.env.PEERS
+const peerUrls = peersEnv
+  ? peersEnv.split(",").map(url => url.trim()).filter(Boolean)
   : [
     "http://localhost:5001",
     "http://localhost:5002",
@@ -17,6 +18,7 @@ const peerUrls = process.env.REPLICA_PEERS
   ]
 
 const peers = peerUrls.filter(peerUrl => !peerUrl.endsWith(`:${PORT}`))
+const portNumber = Number(PORT) || 0
 
 // ===== RAFT STATE =====
 let state = "follower"
@@ -25,7 +27,9 @@ let votedFor = null
 let votesReceived = 0
 let log = []
 let commitIndex = -1
+let lastApplied = -1
 let electionInProgress = false
+let entryQueue = Promise.resolve()
 
 // RAFT Leader State
 let nextIndex = {}
@@ -35,7 +39,10 @@ let catchupInFlight = {}
 let electionTimeout = null
 let heartbeatInterval = null
 
-console.log(`Node ${PORT} started`)
+console.log(`[Replica ${PORT}] Starting node (id=${ID})`)
+setTimeout(() => {
+  resetElectionTimer()
+}, Math.random() * 15 + 10)
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -47,18 +54,35 @@ function getLastLogInfo() {
   return { lastLogIndex, lastLogTerm }
 }
 
+function applyCommittedEntries() {
+  while (lastApplied < commitIndex) {
+    lastApplied++
+    const entry = log[lastApplied]
+    if (entry) {
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] Applied committed entry index ${lastApplied}`)
+    }
+  }
+}
+
 function resetElectionTimer() {
   clearTimeout(electionTimeout)
+  electionTimeout = null
 
-  const timeout = Math.random() * 500 + 1000
-  console.log(`Election timer reset on node ${PORT}`)
+  const portOffset = Math.max(0, portNumber - 5001) * 1500
+  const timeout = 250 + portOffset + Math.random() * 100
+  console.log(`[Replica ${PORT}][Term ${currentTerm}] Election timer set: ${timeout.toFixed(0)}ms`)
 
-  electionTimeout = setTimeout(() => {
-    if (state === "follower") startElection()
+  electionTimeout = setTimeout(async () => {
+    if (state === "follower") {
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] ELECTION TIMEOUT - starting election`)
+      await startElection()
+    }
   }, timeout)
 }
 
 function stepDownToFollower(term, reason) {
+  const oldTerm = currentTerm
+  const wasLeader = state === "leader"
   currentTerm = term
   state = "follower"
   votedFor = null
@@ -67,60 +91,93 @@ function stepDownToFollower(term, reason) {
   clearTimeout(electionTimeout)
 
   if (reason) {
-    console.log(`Node ${PORT} stepped down to follower (${reason})`)
+    console.log(`[Replica ${PORT}][Term ${oldTerm}→${term}] Demoting: ${reason}`)
   }
 
   resetElectionTimer()
 }
 
 async function startElection() {
-  if (state !== "follower") return
-  if (electionInProgress) return
+  if (state !== "follower") {
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] Cannot start election - not a follower (state=${state})`)
+    return
+  }
+  if (electionInProgress) {
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] Election already in progress`)
+    return
+  }
 
   electionInProgress = true
   state = "candidate"
   currentTerm++
   votedFor = ID
   votesReceived = 1
+  clearTimeout(electionTimeout)
+  electionTimeout = null
 
-  console.log(`Election started on node ${PORT}`)
-  console.log(`Node ${PORT} -> Candidate (Term ${currentTerm})`)
+  console.log(`[Replica ${PORT}][Term ${currentTerm}] ★ ELECTION STARTED ★ - voting for self, requesting ${peers.length} votes`)
 
-  for (const peer of peers) {
-    try {
-      const { lastLogIndex, lastLogTerm } = getLastLogInfo()
-      const res = await axios.post(peer + "/request-vote", {
-        term: currentTerm,
-        candidateId: ID,
-        lastLogIndex,
-        lastLogTerm
+  const { lastLogIndex, lastLogTerm } = getLastLogInfo()
+  let leaderElected = false
+  const voteRequests = peers.map(peer =>
+    axios.post(peer + "/request-vote", {
+      term: currentTerm,
+      candidateId: ID,
+      lastLogIndex,
+      lastLogTerm
+    }, { timeout: 1000 })
+      .then(res => {
+        if (res.data && res.data.voteGranted) {
+          votesReceived++
+          const peerPort = new URL(peer).port
+          console.log(`[Replica ${PORT}][Term ${currentTerm}] ✓ VOTE GRANTED by replica ${peerPort} (total: ${votesReceived}/3)`)
+
+          if (!leaderElected && state === "candidate" && votesReceived >= 2) {
+            leaderElected = true
+            console.log(`[Replica ${PORT}][Term ${currentTerm}] ✦ MAJORITY REACHED EARLY ✦ - becoming leader immediately`)
+            becomeLeader()
+          }
+
+          return true
+        }
+        return false
       })
+      .catch(err => {
+        const peerPort = new URL(peer).port
+        console.log(`[Replica ${PORT}][Term ${currentTerm}] ✗ Vote request to replica ${peerPort} failed`)
+        return false
+      })
+  )
 
-      if (res.data.voteGranted) {
-        votesReceived++
-      }
+  await Promise.all(voteRequests)
 
-      if (votesReceived >= 2 && state === "candidate") {
-        becomeLeader()
-        return
-      }
-    } catch (e) {}
+  if (state !== "candidate") {
+    if (state !== "leader") {
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] State changed during election - aborting`)
+    }
+    return
   }
 
-  if (state === "candidate") {
+  if (votesReceived >= 2) {
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] ✦ LEADER ELECTED ✦ - won with ${votesReceived}/3 votes`)
+    becomeLeader()
+  } else {
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] ✗ Election FAILED - only ${votesReceived}/3 votes, retrying...`)
     electionInProgress = false
     state = "follower"
+    votedFor = null
     resetElectionTimer()
   }
 }
 
 function becomeLeader() {
-  clearInterval(heartbeatInterval)
-  clearTimeout(electionTimeout)
+  if (heartbeatInterval) clearInterval(heartbeatInterval)
+  if (electionTimeout) clearTimeout(electionTimeout)
+  electionTimeout = null
 
   electionInProgress = false
   state = "leader"
-  console.log(`Node ${PORT} -> Leader (Term ${currentTerm})`)
+  console.log(`[Replica ${PORT}][Term ${currentTerm}] ★★★ BECAME LEADER ★★★`)
 
   nextIndex = {}
   matchIndex = {}
@@ -131,15 +188,16 @@ function becomeLeader() {
     catchupInFlight[peerPort] = false
   })
 
-  // Leader always has all local entries.
   matchIndex[PORT] = log.length - 1
 
   startHeartbeat()
+  peers.forEach(peer => scheduleCatchup(peer))
 }
 
 function advanceCommitIndex() {
+  let updated = false
   for (let n = log.length - 1; n > commitIndex; n--) {
-    let replicated = 1 // leader itself
+    let replicated = 1
 
     for (const peer of peers) {
       const peerPort = new URL(peer).port
@@ -151,23 +209,31 @@ function advanceCommitIndex() {
     if (replicated >= 2) {
       if (log[n] && log[n].term === currentTerm) {
         commitIndex = n
-        console.log(`Commit index advanced to ${commitIndex}`)
+        updated = true
+        console.log(`[Replica ${PORT}][Term ${currentTerm}] commitIndex updated to ${commitIndex}`)
+        applyCommittedEntries()
         break
       }
-      console.log("Skipping commit due to term mismatch")
-    } else {
-      console.log("Majority not reached, skipping commit")
     }
   }
+
+  return updated
 }
 
 function startHeartbeat() {
-  const heartbeatDelay = 150 + Math.random() * 50
+  if (heartbeatInterval) clearInterval(heartbeatInterval)
+  const heartbeatDelay = 50
 
-  heartbeatInterval = setInterval(() => {
-    if (state !== "leader") return
+  console.log(`[Replica ${PORT}][Term ${currentTerm}] Starting heartbeat every ${heartbeatDelay}ms`)
 
-    peers.forEach(async peer => {
+  const sendHeartbeats = async () => {
+    if (state !== "leader") {
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] Stopping heartbeats - no longer leader`)
+      clearInterval(heartbeatInterval)
+      return
+    }
+
+    const heartbeatPromises = peers.map(async peer => {
       try {
         const peerPort = new URL(peer).port
         const ni = Math.max(0, nextIndex[peerPort] ?? log.length)
@@ -181,27 +247,23 @@ function startHeartbeat() {
           prevLogTerm,
           entries: [],
           leaderCommit: commitIndex
-        })
+        }, { timeout: 500 })
 
         if (res.data && res.data.success) {
           matchIndex[peerPort] = Math.max(matchIndex[peerPort] ?? -1, prevLogIndex)
           nextIndex[peerPort] = Math.max(nextIndex[peerPort] ?? 0, prevLogIndex + 1)
-
-          // Heartbeat succeeded but follower is still behind: drive catch-up in background.
-          if ((nextIndex[peerPort] ?? 0) < log.length) {
-            scheduleCatchup(peer)
-          }
         } else if (res.data && res.data.needSync) {
-          await triggerSyncLog(peer, res.data.currentIndex)
-        } else {
-          nextIndex[peerPort] = Math.max(0, ni - 1)
-          console.log(`Backtracking nextIndex for peer ${peerPort} to ${nextIndex[peerPort]}`)
-          console.log(`Retrying AppendEntries to peer ${peerPort}`)
           scheduleCatchup(peer)
         }
-      } catch (e) {}
+      } catch (err) {
+      }
     })
-  }, heartbeatDelay)
+
+    await Promise.all(heartbeatPromises)
+  }
+
+  sendHeartbeats()
+  heartbeatInterval = setInterval(sendHeartbeats, heartbeatDelay)
 }
 
 function scheduleCatchup(peer) {
@@ -220,24 +282,24 @@ async function triggerSyncLog(peer, fromIndex) {
   const peerPort = new URL(peer).port
   const safeFromIndex = Math.max(0, Math.min(fromIndex ?? 0, log.length))
 
-  console.log(`Triggering sync-log for follower ${peerPort}`)
+  console.log(`[Replica ${PORT}][Term ${currentTerm}] Syncing replica ${peerPort} from index ${safeFromIndex}`)
 
   try {
     const res = await axios.post(peer + "/sync-log", {
       fromIndex: safeFromIndex,
       entries: log.slice(safeFromIndex),
       commitIndex
-    })
+    }, { timeout: 5000 })
 
     if (res.data && res.data.success) {
       nextIndex[peerPort] = log.length
       matchIndex[peerPort] = log.length - 1
-      console.log(`Sync-log completed for follower ${peerPort}`)
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] Sync complete for replica ${peerPort}`)
       advanceCommitIndex()
       return true
     }
   } catch (e) {
-    console.log(`Sync-log failed for follower ${peerPort}: ${e.message}`)
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] Sync failed for replica ${peerPort}`)
   }
 
   return false
@@ -245,20 +307,22 @@ async function triggerSyncLog(peer, fromIndex) {
 
 async function replicateEntry(entry) {
   log.push(entry)
-  console.log(`Node ${PORT} appended entry to log`)
-
   const entryIndex = log.length - 1
+  console.log(`[Replica ${PORT}][Term ${currentTerm}] Entry appended (index ${entryIndex})`)
+
   matchIndex[PORT] = entryIndex
 
   const replicationTasks = peers.map(peer => replicateToPeer(peer, entryIndex).catch(() => false))
 
-  // Wait a bounded time for majority-driven commit while background replication keeps running.
-  const committed = await waitForCommit(entryIndex, 3000)
+  const committed = await waitForCommit(entryIndex, 5000)
   if (!committed) {
-    console.log("Majority not reached, skipping commit")
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] Replication timeout - majority not reached`)
+  } else {
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] Entry committed (index ${entryIndex})`)
   }
 
   await Promise.allSettled(replicationTasks)
+  return { committed, entryIndex }
 }
 
 async function waitForCommit(entryIndex, timeoutMs) {
@@ -293,14 +357,14 @@ async function replicateToPeer(peer, entryIndex) {
         prevLogTerm,
         entries: entriesToSend,
         leaderCommit: commitIndex
-      })
+      }, { timeout: 2000 })
 
       if (res.data && res.data.success) {
         const replicatedLastIndex = ni + entriesToSend.length - 1
         matchIndex[peerPort] = replicatedLastIndex
         nextIndex[peerPort] = ni + entriesToSend.length
 
-        console.log(`Replication success from ${peerPort}, matchIndex=${matchIndex[peerPort]}`)
+        console.log(`[Replica ${PORT}][Term ${currentTerm}] Ack from follower ${peerPort} (matchIndex=${matchIndex[peerPort]})`)
         advanceCommitIndex()
 
         if (matchIndex[peerPort] >= entryIndex) {
@@ -318,12 +382,11 @@ async function replicateToPeer(peer, entryIndex) {
       }
 
       nextIndex[peerPort] = Math.max(0, ni - 1)
-      console.log(`Backtracking nextIndex for peer ${peerPort} to ${nextIndex[peerPort]}`)
-      console.log(`Retrying AppendEntries to peer ${peerPort}`)
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] Backtracking nextIndex for replica ${peerPort}`)
+      continue
     } catch (e) {
-      console.log(`Network error to ${peerPort}: ${e.message}`)
-      console.log(`Retrying AppendEntries to peer ${peerPort}`)
-      await sleep(150)
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] RPC to replica ${peerPort} failed`)
+      return false
     }
   }
 
@@ -340,7 +403,7 @@ app.post("/request-vote", (req, res) => {
   }
 
   if (term > currentTerm) {
-    stepDownToFollower(term, `newer term ${term} in vote request`)
+    stepDownToFollower(term, `higher term ${term} in RequestVote`)
   }
 
   const localLastLog = getLastLogInfo()
@@ -348,68 +411,74 @@ app.post("/request-vote", (req, res) => {
     lastLogTerm > localLastLog.lastLogTerm ||
     (lastLogTerm === localLastLog.lastLogTerm && lastLogIndex >= localLastLog.lastLogIndex)
 
-  if ((votedFor === null || votedFor === candidateId) && candidateUpToDate) {
+  const canVote = votedFor === null || votedFor === candidateId
+  if (canVote && candidateUpToDate) {
     votedFor = candidateId
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] ✓ Voted for replica ${candidateId}`)
     resetElectionTimer()
     return res.json({ voteGranted: true })
   }
 
+  console.log(`[Replica ${PORT}][Term ${currentTerm}] ✗ Denied vote to replica ${candidateId}`)
   return res.json({ voteGranted: false })
-})
-
-app.post("/heartbeat", (req, res) => {
-  const { term } = req.body
-
-  if (term >= currentTerm) {
-    console.log(`Election cancelled by heartbeat on node ${PORT}`)
-    stepDownToFollower(term, `heartbeat term ${term}`)
-  }
-
-  res.sendStatus(200)
 })
 
 app.post("/append-entries", (req, res) => {
   const { term, leaderId, prevLogIndex, prevLogTerm, entries, leaderCommit } = req.body
+  const isHeartbeat = !entries || entries.length === 0
 
   if (term < currentTerm) {
-    console.log(`AppendEntries rejected: term ${term} < currentTerm ${currentTerm}`)
     return res.json({ success: false })
   }
 
   if (term > currentTerm) {
-    stepDownToFollower(term, `new term ${term} in append-entries`)
-  } else {
-    stepDownToFollower(term, `append-entries from leader ${leaderId}`)
+    stepDownToFollower(term, `higher term ${term} in AppendEntries`)
+  } else if (term === currentTerm) {
+    if (state === "leader" && leaderId !== ID) {
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] Ignoring conflicting same-term AppendEntries from leader ${leaderId}`)
+      return res.json({ success: true })
+    }
+
+    if (state !== "follower") {
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] Demoting from ${state} to follower`)
+      state = "follower"
+      electionInProgress = false
+      clearInterval(heartbeatInterval)
+    }
+    resetElectionTimer()
+  }
+
+  if (isHeartbeat) {
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] ♥ Heartbeat from leader ${leaderId}`)
   }
 
   if (prevLogIndex >= 0 && prevLogIndex >= log.length) {
-    console.log(`Follower requesting sync from index ${log.length}`)
-    console.log(`AppendEntries rejected: prevLogIndex ${prevLogIndex} >= log.length ${log.length}`)
     return res.json({ success: false, needSync: true, currentIndex: log.length })
   }
 
   if (prevLogIndex >= 0 && log[prevLogIndex].term !== prevLogTerm) {
-    console.log(`Follower requesting sync from index ${log.length}`)
-    console.log(`AppendEntries rejected: term mismatch at prevLogIndex ${prevLogIndex}`)
-    console.log(`  Expected term ${prevLogTerm}, got ${log[prevLogIndex].term}`)
-    log.splice(prevLogIndex + 1)
     return res.json({ success: false, needSync: true, currentIndex: log.length })
   }
 
   if (entries && entries.length > 0) {
     const appendStartIndex = prevLogIndex + 1
+    if (appendStartIndex <= commitIndex && appendStartIndex < log.length) {
+      return res.json({ success: false, needSync: true, currentIndex: commitIndex + 1 })
+    }
+
     if (appendStartIndex < log.length) {
       log.splice(appendStartIndex)
     }
     log.push(...entries)
-    console.log(`Node ${PORT} appended ${entries.length} entries, log length now ${log.length}`)
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] Appended ${entries.length} entries (log size: ${log.length})`)
   }
 
   if (typeof leaderCommit === "number") {
     const followerCommit = Math.min(leaderCommit, log.length - 1)
     if (followerCommit > commitIndex) {
       commitIndex = followerCommit
-      console.log(`Follower ${PORT} advanced commitIndex to ${commitIndex}`)
+      console.log(`[Replica ${PORT}][Term ${currentTerm}] commitIndex updated to ${commitIndex}`)
+      applyCommittedEntries()
     }
   }
 
@@ -420,15 +489,15 @@ app.post("/sync-log", (req, res) => {
   const { fromIndex = 0, entries, commitIndex: leaderCommit } = req.body
   const safeFromIndex = Math.max(0, Math.min(fromIndex, log.length))
 
-  // Assignment compatibility: follower can either serve or apply sync.
   if (Array.isArray(entries)) {
     log = log.slice(0, safeFromIndex).concat(entries)
 
     if (typeof leaderCommit === "number") {
       commitIndex = Math.min(leaderCommit, log.length - 1)
+      applyCommittedEntries()
     }
 
-    console.log(`Follower synced from index ${safeFromIndex}`)
+    console.log(`[Replica ${PORT}][Term ${currentTerm}] Synced from index ${safeFromIndex} (log size: ${log.length})`)
     return res.json({ success: true, logLength: log.length, commitIndex })
   }
 
@@ -443,14 +512,33 @@ app.post("/add-entry", async (req, res) => {
     return res.status(400).json({ error: "Not leader" })
   }
 
-  const entry = {
-    term: currentTerm,
-    data: req.body
+  const requestBody = req.body
+  const resultPromise = entryQueue.then(async () => {
+    if (state !== "leader") {
+      return { success: false, error: "Not leader" }
+    }
+
+    const entry = {
+      term: currentTerm,
+      data: requestBody
+    }
+
+    const { committed, entryIndex } = await replicateEntry(entry)
+    if (!committed) {
+      return { success: false, error: "Entry not committed", entryIndex }
+    }
+
+    return { success: true, entry, entryIndex, commitIndex }
+  })
+
+  entryQueue = resultPromise.catch(() => undefined)
+  const result = await resultPromise
+
+  if (!result.success) {
+    return res.status(503).json(result)
   }
 
-  await replicateEntry(entry)
-
-  return res.json({ success: true, entry, commitIndex })
+  return res.json(result)
 })
 
 app.get("/log-state", (req, res) => {
@@ -472,9 +560,17 @@ app.get("/log-state", (req, res) => {
   res.json(debugInfo)
 })
 
+app.get("/committed-log", (req, res) => {
+  const safeCommitIndex = Math.min(commitIndex, log.length - 1)
+  const entries = safeCommitIndex >= 0 ? log.slice(0, safeCommitIndex + 1) : []
+
+  console.log(`[Replica ${PORT}][Term ${currentTerm}] Serving committed log up to index ${safeCommitIndex}`)
+  return res.json({
+    success: true,
+    entries
+  })
+})
+
 app.listen(PORT, () => {
-  console.log(`Running on port ${PORT}`)
-  setTimeout(() => {
-    resetElectionTimer()
-  }, Math.random() * 300)
+  console.log(`[Replica ${PORT}] HTTP server listening on port ${PORT}`)
 })

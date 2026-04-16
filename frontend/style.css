@@ -253,8 +253,7 @@ body::before {
 }
 
 .left-sidebar,
-.right-sidebar,
-.ai-panel {
+.right-sidebar {
   position: fixed;
   border-radius: 16px;
   border: 1px solid var(--glass-border);
@@ -277,13 +276,6 @@ body::before {
   right: 14px;
   width: 230px;
   max-height: calc(100vh - 102px);
-}
-
-.ai-panel {
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: 16px;
-  width: min(420px, 78vw);
 }
 
 .debug-panel {
@@ -343,26 +335,9 @@ body::before {
 }
 
 .left-sidebar h2,
-.right-sidebar h2,
-.ai-panel h2 {
+.right-sidebar h2 {
   margin: 0 0 8px;
   font-size: 0.9rem;
-}
-
-.ai-panel p {
-  margin: 0 0 10px;
-  color: var(--text-soft);
-  font-size: 0.74rem;
-}
-
-.ai-panel input {
-  width: 100%;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--text-main);
-  border-radius: 10px;
-  padding: 10px;
-  margin-bottom: 10px;
 }
 
 .identity-chip,
@@ -550,11 +525,6 @@ body.is-drawing #drawCanvas {
 }
 
 @media (max-width: 760px) {
-  .ai-panel {
-    width: calc(100vw - 28px);
-    bottom: 10px;
-  }
-
   .debug-panel {
     width: calc(100vw - 28px);
     top: 82px;
