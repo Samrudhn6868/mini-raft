@@ -1,56 +1,13 @@
-# Mini-RAFT distributed stack: 3 replicas + gateway
+# Mini-RAFT Mono-Cluster: One Container, Full RAFT Cluster
 services:
-  node1:
-    build: .
-    environment:
-      REPLICA_ID: node1
-      PORT: 5001
-      PEERS: http://node1:5001,http://node2:5002,http://node3:5003
-    ports:
-      - "5001:5001"
-    command: ["node", "replica.js"]
-    networks:
-      - mini-raft-net
-
-  node2:
-    build: .
-    environment:
-      REPLICA_ID: node2
-      PORT: 5002
-      PEERS: http://node1:5001,http://node2:5002,http://node3:5003
-    ports:
-      - "5002:5002"
-    command: ["node", "replica.js"]
-    networks:
-      - mini-raft-net
-
-  node3:
-    build: .
-    environment:
-      REPLICA_ID: node3
-      PORT: 5003
-      PEERS: http://node1:5001,http://node2:5002,http://node3:5003
-    ports:
-      - "5003:5003"
-    command: ["node", "replica.js"]
-    networks:
-      - mini-raft-net
-
   gateway:
     build: .
     environment:
       PORT: 3000
-      REPLICA_URLS: http://node1:5001,http://node2:5002,http://node3:5003
+      NODE_ENV: production
     ports:
       - "3000:3000"
-    command: ["node", "gateway.js"]
-    depends_on:
-      - node1
-      - node2
-      - node3
-    networks:
-      - mini-raft-net
+    restart: always
 
-networks:
-  mini-raft-net:
-    driver: bridge
+# No more node1, node2, node3 services. 
+# The gateway container spawns them internally on localhost.
