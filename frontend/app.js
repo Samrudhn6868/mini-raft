@@ -1,6 +1,23 @@
 import { initAuth } from "./auth.js"
 import { RTCMesh } from "./rtc.js"
 
+// Global error handler to catch startup crashes
+window.onerror = function(msg, url, lineNo, columnNo, error) {
+  const errStr = `Error: ${msg}\nLine: ${lineNo}\nColumn: ${columnNo}\n${error && error.stack}`;
+  console.error("GLOBAL CRASH:", errStr);
+  alert("CRITICAL ERROR DURING STARTUP:\n" + msg + "\nCheck console for full stack.");
+  return false;
+};
+
+// Fallback for crypto.randomUUID for broader browser support
+const generateUUID = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+};
+
 const isLocalHost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
 
 // Priority: Localhost -> Railway -> Render (Fallback)
@@ -45,7 +62,7 @@ const debugLogList = document.getElementById("debugLogList")
 
 const state = {
   session: null,
-  selfId: crypto.randomUUID(),
+  selfId: generateUUID(),
   ws: null,
   reconnectTimer: null,
   toastTimer: null,
@@ -56,8 +73,8 @@ const state = {
   redoStack: [],
   seenEvents: new Set(),
   cursors: new Map(),
-  brushSize: Number(brushSizeInput.value),
-  brushColor: brushColorInput.value,
+  brushSize: brushSizeInput ? Number(brushSizeInput.value) : 2,
+  brushColor: brushColorInput ? brushColorInput.value : "#6ee7ff",
   lastPoint: null,
   snapToGrid: false,
   debugVisible: false,
@@ -76,7 +93,7 @@ const state = {
 }
 
 function createId() {
-  return crypto.randomUUID()
+  return generateUUID()
 }
 
 function markSeen(id) {
@@ -108,12 +125,14 @@ function createThrottle(fn, wait) {
 }
 
 function setStatus(connected) {
+  if (!statusEl) return;
   statusEl.classList.toggle("connected", connected)
   statusEl.classList.toggle("disconnected", !connected)
   statusEl.textContent = connected ? "Connected" : "Disconnected"
 }
 
 function showToast(message, tone = "warning", autoHideMs = 0) {
+  if (!networkToast) return;
   if (state.toastTimer) {
     clearTimeout(state.toastTimer)
     state.toastTimer = null
@@ -132,6 +151,7 @@ function showToast(message, tone = "warning", autoHideMs = 0) {
 }
 
 function renderIdentity() {
+  if (!identityChip || !state.session) return;
   const { username, avatar, room } = state.session
   identityChip.textContent = `${avatar} ${username} | Room: ${room}`
 }
@@ -145,6 +165,7 @@ function pushDebugLog(message) {
 }
 
 function renderDebugPanel() {
+  if (!debugSummary || !debugLogList) return;
   const peers = state.rtc ? state.rtc.peers.size : 0
   state.debug.peersConnected = peers
 
@@ -170,6 +191,7 @@ function updateDebug(partial = {}) {
 }
 
 function resizeCanvas() {
+  if (!canvas) return;
   const dpr = window.devicePixelRatio || 1
   const rect = canvas.getBoundingClientRect()
 
@@ -186,54 +208,11 @@ function resizeCanvas() {
   redrawCanvas()
 }
 
-function pointFromEvent(event) {
-  const rect = canvas.getBoundingClientRect()
-  return {
-    x: event.clientX - rect.left,
-    y: event.clientY - rect.top
-  }
+function redrawCanvas() {
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height)
+  state.history.forEach(action => draw(action))
 }
-
-function snapPoint(point) {
-  if (!state.snapToGrid) return point
-  const grid = 16
-  return {
-    x: Math.round(point.x / grid) * grid,
-    y: Math.round(point.y / grid) * grid
-  }
-}
-
-function dist(a, b) {
-  return Math.hypot(a.x - b.x, a.y - b.y)
-}
-
-function pointToLineDistance(p, a, b) {
-  const lineLength = dist(a, b)
-  if (lineLength === 0) return dist(p, a)
-
-  const t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / (lineLength * lineLength)
-  const clamped = Math.max(0, Math.min(1, t))
-  const projection = {
-    x: a.x + clamped * (b.x - a.x),
-    y: a.y + clamped * (b.y - a.y)
-  }
-  return dist(p, projection)
-}
-
-function circleFromPoints(points) {
-  const center = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 })
-
-  center.x /= points.length
-  center.y /= points.length
-
-  const distances = points.map(p => dist(p, center))
-  const radius = distances.reduce((a, b) => a + b, 0) / distances.length
-  const variance = distances.reduce((acc, d) => acc + Math.pow(d - radius, 2), 0) / distances.length
-
-  return { center, radius, variance }
-}
-
-// connectSocketLegacy removed in favor of unified connectSocket below
 
 function pointFromEvent(event) {
   const rect = canvas.getBoundingClientRect()
@@ -314,6 +293,7 @@ function normalizeStroke(points) {
 }
 
 function drawSegment(a, b, color, size) {
+  if (!ctx) return;
   ctx.strokeStyle = color || "#6ee7ff"
   ctx.lineWidth = Math.max(1, Number(size) || 1)
   ctx.beginPath()
@@ -324,34 +304,17 @@ function drawSegment(a, b, color, size) {
 
 function drawRemote(data) {
   if (!data) return
-
   if (Array.isArray(data.points) && data.points.length > 1) {
     for (let i = 1; i < data.points.length; i++) {
       drawSegment(data.points[i - 1], data.points[i], data.color, data.size)
     }
     return
   }
-
-  if (
-    typeof data.x === "number" &&
-    typeof data.y === "number" &&
-    typeof data.lastX === "number" &&
-    typeof data.lastY === "number"
-  ) {
-    drawSegment(
-      { x: data.lastX, y: data.lastY },
-      { x: data.x, y: data.y },
-      data.color,
-      data.size
-    )
-  }
 }
 
 function handleRemoteDrawMessage(payload) {
   const room = payload.room || (payload.data && payload.data.room)
-  if (room !== state.session.room) return
-
-  console.log("Receiving:", payload)
+  if (!state.session || room !== state.session.room) return
 
   if (payload.data) {
     if (Array.isArray(payload.data.points) && payload.data.points.length > 1) {
@@ -365,43 +328,16 @@ function handleRemoteDrawMessage(payload) {
         size: payload.data.size,
         points: payload.data.points
       })
-    } else if (
-      typeof payload.data.x === "number" &&
-      typeof payload.data.y === "number" &&
-      typeof payload.data.lastX === "number" &&
-      typeof payload.data.lastY === "number"
-    ) {
-      state.history.push({
-        id: payload.eventId || createId(),
-        kind: "stroke",
-        user: payload.user,
-        avatar: payload.avatar,
-        userId: payload.userId,
-        color: payload.data.color,
-        size: payload.data.size,
-        points: [
-          { x: payload.data.lastX, y: payload.data.lastY },
-          { x: payload.data.x, y: payload.data.y }
-        ]
-      })
     }
   }
-
   drawRemote(payload.data)
 }
 
 function draw(action) {
-  if (!action) return
-  if (action.kind !== "stroke" || !Array.isArray(action.points)) return
-
+  if (!action || action.kind !== "stroke" || !Array.isArray(action.points)) return
   for (let i = 1; i < action.points.length; i++) {
     drawSegment(action.points[i - 1], action.points[i], action.color, action.size)
   }
-}
-
-function redrawCanvas() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height)
-  state.history.forEach(action => draw(action))
 }
 
 function pushHistory(action) {
@@ -410,11 +346,13 @@ function pushHistory(action) {
 }
 
 function updateBrushPreview(clientX, clientY) {
+  if (!brushPreview) return;
   brushPreview.style.left = `${clientX}px`
   brushPreview.style.top = `${clientY}px`
 }
 
 function refreshBrushPreviewSize() {
+  if (!brushPreview) return;
   const previewSize = Math.max(8, state.brushSize)
   brushPreview.style.width = `${previewSize}px`
   brushPreview.style.height = `${previewSize}px`
@@ -440,26 +378,10 @@ function wsEnvelope(payload) {
 }
 
 function broadcastOperation(operation) {
-  console.log("Sending:", operation.data || operation)
-  
+  if (!state.session) return;
   if (operation.eventId) {
     markSeen(operation.eventId)
   }
-
-  // RTC drawing is disabled to ensure strict RAFT consistency (Committed only)
-  /*
-  const rtcDelivered = state.rtc
-    ? state.rtc.broadcast({ type: "rtc-draw", room: state.session.room, payload: operation })
-    : false
-
-  if (state.rtc) {
-    if (rtcDelivered) {
-      state.debug.drawViaRtc += 1
-      pushDebugLog(`RTC -> ${operation.type}`)
-    }
-  }
-  */
-
   state.debug.drawViaWs += 1
   sendWs(wsEnvelope(operation))
   renderDebugPanel()
@@ -515,49 +437,15 @@ function applyClear({ broadcast = true } = {}) {
   }
 }
 
-function parseIncomingStroke(payload) {
-  const data = payload.data || {}
-
-  if (data.kind === "stroke" && Array.isArray(data.points)) {
-    return {
-      id: data.id || payload.eventId || createId(),
-      kind: "stroke",
-      user: payload.user,
-      avatar: payload.avatar,
-      userId: payload.userId,
-      color: data.color,
-      size: data.size,
-      points: data.points
-    }
-  }
-
-  if (typeof data.x === "number" && typeof data.y === "number") {
-    const start = {
-      x: Number.isFinite(data.lastX) ? data.lastX : data.x,
-      y: Number.isFinite(data.lastY) ? data.lastY : data.y
-    }
-    return {
-      id: payload.eventId || createId(),
-      kind: "stroke",
-      user: payload.user,
-      avatar: payload.avatar,
-      userId: payload.userId,
-      color: data.color,
-      size: data.size,
-      points: [start, { x: data.x, y: data.y }]
-    }
-  }
-
-  return null
-}
-
 function saveDrawing() {
+  if (!state.session) return;
   localStorage.setItem(storageKey("png"), canvas.toDataURL("image/png"))
   localStorage.setItem(storageKey("json"), JSON.stringify({ actions: state.history }))
   showToast("Saved to local storage.", "connected", 1200)
 }
 
 function restoreDrawing() {
+  if (!state.session) return;
   try {
     const raw = localStorage.getItem(storageKey("json"))
     if (!raw) return
@@ -566,9 +454,7 @@ function restoreDrawing() {
       state.history = parsed.actions
       redrawCanvas()
     }
-  } catch {
-    // Ignore storage parse errors.
-  }
+  } catch { /* ignore */ }
 }
 
 function downloadFile(filename, content, type) {
@@ -615,27 +501,22 @@ function exportJson() {
 }
 
 function handleCursor(payload) {
-  if (!payload || payload.room !== state.session.room) return
+  if (!payload || !state.session || payload.room !== state.session.room) return
   if (!payload.userId || payload.userId === state.selfId) return
-  if (typeof payload.x !== "number" || typeof payload.y !== "number") return
 
   let cursor = state.cursors.get(payload.userId)
 
   if (!cursor) {
     const root = document.createElement("div")
     root.className = "remote-cursor"
-
     const dot = document.createElement("div")
     dot.className = "remote-cursor-dot"
-
     const label = document.createElement("div")
     label.className = "remote-cursor-label"
     label.textContent = `${payload.avatar || "🙂"} ${payload.user || "User"}`
-
     root.appendChild(dot)
     root.appendChild(label)
     cursorLayer.appendChild(root)
-
     cursor = { root, timeout: null }
     state.cursors.set(payload.userId, cursor)
   }
@@ -646,9 +527,7 @@ function handleCursor(payload) {
 
   if (cursor.timeout) clearTimeout(cursor.timeout)
   cursor.timeout = setTimeout(() => {
-    if (cursor.root.parentNode) {
-      cursor.root.parentNode.removeChild(cursor.root)
-    }
+    if (cursor.root.parentNode) cursor.root.parentNode.removeChild(cursor.root)
     state.cursors.delete(payload.userId)
   }, 1800)
 }
@@ -656,33 +535,27 @@ function handleCursor(payload) {
 function sendCursor(point) {
   sendWs(wsEnvelope({ type: "cursor", x: point.x, y: point.y }))
 }
-
 const throttledCursor = createThrottle(sendCursor, 30)
 
 function renderUsers(users = []) {
+  if (!userCountEl || !userList) return;
   userCountEl.textContent = String(users.length)
   userList.innerHTML = ""
-
   users.forEach(user => {
     const item = document.createElement("li")
     item.textContent = `${user.avatar || "🙂"} ${user.user || "Guest"}`
-
     if (user.userId === state.selfId) {
       item.classList.add("current-user")
       item.textContent += " (You)"
     }
-
     userList.appendChild(item)
   })
-
-  if (state.rtc) {
-    state.rtc.syncPeers(users.map(user => user.userId))
-  }
+  if (state.rtc) state.rtc.syncPeers(users.map(u => u.userId))
 }
 
 function renderRooms(rooms = []) {
+  if (!roomList) return;
   roomList.innerHTML = ""
-
   rooms.forEach(room => {
     const item = document.createElement("li")
     item.textContent = `${room.room} (${room.count})`
@@ -692,7 +565,6 @@ function renderRooms(rooms = []) {
 
 function scheduleReconnect() {
   if (state.reconnectTimer) return
-
   showToast("Attempting reconnect...", "warning")
   state.reconnectTimer = setTimeout(() => {
     state.reconnectTimer = null
@@ -701,24 +573,15 @@ function scheduleReconnect() {
 }
 
 function handleIncomingOperation(payload, source = "ws") {
-  if (!payload || payload.room !== state.session.room) return
-  
-  // Robust eventId detection
-  const eventId = payload.eventId || (payload.data && payload.data.id) || payload.id;
-  if (!eventId) return;
-
-  if (hasSeen(eventId)) return
+  if (!payload || !state.session || payload.room !== state.session.room) return
+  const eventId = payload.eventId || (payload.data && payload.data.id);
+  if (!eventId || hasSeen(eventId)) return
   markSeen(eventId)
 
-  if (payload.type === "draw") {
-    handleRemoteDrawMessage(payload)
-  } else if (payload.type === "clear") {
-    applyClear({ broadcast: false })
-  } else if (payload.type === "undo") {
-    handleUndo({ broadcast: false, data: payload.data })
-  } else if (payload.type === "redo") {
-    handleRedo({ broadcast: false, data: payload.data })
-  }
+  if (payload.type === "draw") handleRemoteDrawMessage(payload)
+  else if (payload.type === "clear") applyClear({ broadcast: false })
+  else if (payload.type === "undo") handleUndo({ broadcast: false, data: payload.data })
+  else if (payload.type === "redo") handleRedo({ broadcast: false, data: payload.data })
 }
 
 function connectSocket() {
@@ -732,137 +595,49 @@ function connectSocket() {
     setStatus(true)
     showToast("Back online. Sync restored.", "connected", 1300)
     sendWs(wsEnvelope({ type: "join" }))
-
-    if (state.rtc) {
-      state.rtc.close()
-    }
-
+    if (state.rtc) state.rtc.close()
     state.rtc = new RTCMesh({
       selfId: state.selfId,
       room: state.session.room,
-      wsSignalSend: payload => {
-        const kind = payload.signal && payload.signal.kind
-        if (kind && state.debug.rtcSignalsOut[kind] !== undefined) {
-          state.debug.rtcSignalsOut[kind] += 1
-        }
-        pushDebugLog(`RTC signal out: ${kind || "unknown"}`)
+      wsSignalSend: payload => sendWs(wsEnvelope({ type: "rtc-signal", ...payload })),
+      onData: packet => handleIncomingOperation(packet.payload, "rtc"),
+      onPeerStateChange: ({ peerId, state: ps }) => {
+        state.debug.peerState = ps
         renderDebugPanel()
-        sendWs(wsEnvelope({ type: "rtc-signal", ...payload }))
-      },
-      onData: packet => {
-        if (!packet || packet.type !== "rtc-draw" || packet.room !== state.session.room) return
-        pushDebugLog("RTC data in: rtc-draw")
-        renderDebugPanel()
-        handleIncomingOperation(packet.payload, "rtc")
-      },
-      onPeerStateChange: ({ peerId, state: peerState }) => {
-        state.debug.peerState = peerState
-        pushDebugLog(`Peer ${peerId.slice(0, 6)} state: ${peerState}`)
-        renderDebugPanel()
-        if (peerState === "failed") {
-          showToast("Peer optimization failed. Using server sync.", "warning", 1400)
-        }
       }
     })
   })
 
   state.ws.addEventListener("close", () => {
     updateDebug({ wsState: "closed" })
-    pushDebugLog("WS closed")
     setStatus(false)
-    showToast("Connection lost. Reconnecting...", "warning")
     scheduleReconnect()
-  })
-
-  state.ws.addEventListener("error", () => {
-    updateDebug({ wsState: "error" })
-    pushDebugLog("WS error")
-    setStatus(false)
-    showToast("Network error. Retrying shortly...", "warning")
   })
 
   state.ws.addEventListener("message", async event => {
     try {
       const payload = JSON.parse(event.data)
       state.debug.wsIn += 1
-      pushDebugLog(`WS <- ${payload.type || "unknown"}`)
-      renderDebugPanel()
-
       if (payload.type === "welcome" && payload.clientId) {
-        const changed = state.selfId !== payload.clientId
         state.selfId = payload.clientId
-        if (changed) {
-          renderIdentity()
-          sendWs(wsEnvelope({ type: "join" }))
-          if (state.rtc) {
-            state.rtc.setContext({ selfId: state.selfId, room: state.session.room })
-          }
-        }
-        return
-      }
-
-      if (payload.type === "user-list") {
-        renderUsers(payload.users || [])
-        return
-      }
-
-      if (payload.type === "room-stats") {
-        renderRooms(payload.rooms || [])
-        return
-      }
-
-      if (payload.type === "rtc-signal") {
-        const kind = payload.signal && payload.signal.kind
-        if (kind && state.debug.rtcSignalsIn[kind] !== undefined) {
-          state.debug.rtcSignalsIn[kind] += 1
-        }
-        pushDebugLog(`RTC signal in: ${kind || "unknown"}`)
-        renderDebugPanel()
-        if (state.rtc) {
-          await state.rtc.handleSignal(payload)
-        }
-        return
-      }
-
-      if (payload.type === "cursor") {
-        handleCursor(payload)
-        return
-      }
-
-      if (payload.type === "INIT_STATE") {
-        console.log("Loading initial state", payload.entries.length);
-        
-        // Clear local state before applying initial state
-        state.history = [];
-        state.redoStack = [];
-        state.seenEvents.clear();
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-        for (const entry of payload.entries) {
-          if (entry && entry.data) {
-            handleIncomingOperation(entry.data, "initial");
-          }
-        }
-        return;
-      }
-
-      if (["draw", "clear", "undo", "redo"].includes(payload.type)) {
-        if (payload.type === "draw") {
-          handleRemoteDrawMessage(payload)
-          return
-        }
-        handleIncomingOperation(payload, "ws")
-      }
-    } catch {
-      // Ignore malformed messages.
-    }
+        renderIdentity()
+        sendWs(wsEnvelope({ type: "join" }))
+      } else if (payload.type === "user-list") renderUsers(payload.users)
+      else if (payload.type === "room-stats") renderRooms(payload.rooms)
+      else if (payload.type === "rtc-signal" && state.rtc) await state.rtc.handleSignal(payload)
+      else if (payload.type === "cursor") handleCursor(payload)
+      else if (payload.type === "INIT_STATE") {
+        state.history = []; redrawCanvas();
+        for (const entry of payload.entries) if (entry && entry.data) handleIncomingOperation(entry.data, "initial")
+      } else handleIncomingOperation(payload)
+      renderDebugPanel()
+    } catch { /* ignore */ }
   })
 }
 
 function startStroke(event) {
   state.isDrawing = true
   document.body.classList.add("is-drawing")
-
   const point = snapPoint(pointFromEvent(event))
   state.currentStroke = [point]
   state.lastPoint = point
@@ -870,31 +645,18 @@ function startStroke(event) {
 
 function continueStroke(event) {
   const point = snapPoint(pointFromEvent(event))
-
   updateBrushPreview(event.clientX, event.clientY)
   throttledCursor(point)
-
   if (!state.isDrawing || !state.lastPoint) return
-
-  const steps = Math.max(1, Math.floor(dist(state.lastPoint, point) / 2))
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps
-    state.currentStroke.push({
-      x: state.lastPoint.x + (point.x - state.lastPoint.x) * t,
-      y: state.lastPoint.y + (point.y - state.lastPoint.y) * t
-    })
-  }
-
   drawSegment(state.lastPoint, point, state.brushColor, state.brushSize)
+  state.currentStroke.push(point)
   state.lastPoint = point
 }
 
 function endStroke() {
   if (!state.isDrawing) return
-
   state.isDrawing = false
   document.body.classList.remove("is-drawing")
-
   if (state.currentStroke.length > 1) {
     const action = {
       id: createId(),
@@ -906,19 +668,9 @@ function endStroke() {
       size: state.brushSize,
       points: [...state.currentStroke]
     }
-
     pushHistory(action)
-
-    // Send an authoritative full-stroke payload to keep all clients in sync.
-    broadcastOperation({
-      type: "draw",
-      eventId: action.id,
-      data: action
-    })
+    broadcastOperation({ type: "draw", eventId: action.id, data: action })
   }
-
-  state.currentStroke = []
-  state.lastPoint = null
 }
 
 function bindUI() {
@@ -927,20 +679,17 @@ function bindUI() {
     brushValue.textContent = `${state.brushSize} px`
     refreshBrushPreviewSize()
   })
-
   brushColorInput.addEventListener("input", () => {
     state.brushColor = brushColorInput.value
     refreshBrushPreviewSize()
   })
-
   snapBtn.addEventListener("click", () => {
     state.snapToGrid = !state.snapToGrid
     snapBtn.textContent = `Snap Grid: ${state.snapToGrid ? "On" : "Off"}`
   })
-
-  undoBtn.addEventListener("click", () => handleUndo({ broadcast: true }))
-  redoBtn.addEventListener("click", () => handleRedo({ broadcast: true }))
-  clearBtn.addEventListener("click", () => applyClear({ broadcast: true }))
+  undoBtn.addEventListener("click", () => handleUndo())
+  redoBtn.addEventListener("click", () => handleRedo())
+  clearBtn.addEventListener("click", () => applyClear())
   saveBtn.addEventListener("click", saveDrawing)
   exportPngBtn.addEventListener("click", exportPng)
   exportSvgBtn.addEventListener("click", exportSvg)
@@ -948,70 +697,27 @@ function bindUI() {
   debugToggleBtn.addEventListener("click", () => {
     state.debugVisible = !state.debugVisible
     debugPanel.classList.toggle("hidden", !state.debugVisible)
-    debugToggleBtn.textContent = state.debugVisible ? "Debug: On" : "Debug"
-    pushDebugLog(state.debugVisible ? "Debug panel opened" : "Debug panel closed")
-    renderDebugPanel()
   })
-
-  canvas.addEventListener("pointerdown", event => {
-    canvas.setPointerCapture(event.pointerId)
-    startStroke(event)
-  })
+  canvas.addEventListener("pointerdown", e => { canvas.setPointerCapture(e.pointerId); startStroke(e); })
   canvas.addEventListener("pointermove", continueStroke)
   canvas.addEventListener("pointerup", endStroke)
-  canvas.addEventListener("pointercancel", endStroke)
-
-  canvas.addEventListener("pointerleave", () => {
-    brushPreview.classList.remove("visible")
-  })
-  canvas.addEventListener("pointerenter", () => {
-    brushPreview.classList.add("visible")
-  })
-  canvas.addEventListener("pointermove", () => {
-    brushPreview.classList.add("visible")
-  })
-
   window.addEventListener("resize", resizeCanvas)
 }
 
 function boot(session) {
   try {
     state.session = session
-    renderIdentity()
-    bindUI()
-    resizeCanvas()
-    refreshBrushPreviewSize()
-    restoreDrawing()
-
-    setStatus(false)
-    renderDebugPanel()
-    showToast("Connecting to RAFT gateway...", "warning")
-    connectSocket()
-    console.log("Mini-RAFT Bootstrapped successfully");
-  } catch (err) {
-    console.error("Boot failure:", err);
-    alert("App failed to start. Check console for details.");
-  }
+    renderIdentity(); bindUI(); resizeCanvas(); refreshBrushPreviewSize(); restoreDrawing();
+    setStatus(false); renderDebugPanel(); showToast("Connecting to RAFT...", "warning")
+    connectSocket();
+  } catch (err) { alert(`Boot failure: ${err.message}`); }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  console.log("Mini-RAFT app.js loaded and DOM ready");
-  
   try {
     initAuth({
-      loginOverlay,
-      appShell,
-      loginForm,
-      usernameInput,
-      avatarInput,
-      roomInput,
-      onReady: (session) => {
-        console.log("Login authorized, booting app...");
-        boot(session);
-      }
+      loginOverlay, appShell, loginForm, usernameInput, avatarInput, roomInput,
+      onReady: boot
     });
-    console.log("Auth initialized");
-  } catch (err) {
-    console.error("Auth initialization failed:", err);
-  }
+  } catch (err) { console.error("Auth boot failed", err); }
 });
