@@ -2,11 +2,10 @@ const express = require("express")
 const http = require("http")
 const WebSocket = require("ws")
 const axios = require("axios")
-const path = require("path")
-const crypto = require("crypto")
 const cors = require("cors")
 
 const app = express()
+app.use(express.json())
 app.use(cors())
 
 const server = http.createServer(app)
@@ -18,9 +17,9 @@ const strictRaftMode = String(process.env.RAFT_STRICT || "").toLowerCase() === "
 const replicaUrls = (process.env.REPLICA_URLS
   ? process.env.REPLICA_URLS.split(",").map(url => url.trim()).filter(Boolean)
   : [
-    "http://localhost:5001",
-    "http://localhost:5002",
-    "http://localhost:5003"
+    "http://node1:5001",
+    "http://node2:5002",
+    "http://node3:5003"
   ])
 
 function sleep(ms) {
@@ -31,71 +30,44 @@ function sleep(ms) {
 const clients = new Set()
 const clientMeta = new Map()
 
-function removeClient(client, reason = "disconnect") {
-  if (!clients.has(client)) return
-
-  const meta = clientMeta.get(client)
-  clients.delete(client)
-  clientMeta.delete(client)
-
-  if (meta && meta.room) {
-    broadcastUserList(meta.room)
-  }
-  broadcastRoomStats()
-
-  if (reason) {
-    console.log(`Client removed: ${reason}`)
+// -----------------------------
+// Utils: Messaging
+// -----------------------------
+function sendToClient(ws, payload) {
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(payload))
   }
 }
 
-function sendToClient(client, payload) {
-  if (client.readyState === WebSocket.OPEN) {
-    client.send(JSON.stringify(payload))
-  }
+function broadcastAll(payload) {
+  clients.forEach(ws => sendToClient(ws, payload))
 }
 
-function getRoomClients(room) {
-  if (!room) return []
-
-  const roomClients = []
-  clients.forEach(client => {
-    const meta = clientMeta.get(client)
+function broadcastRoom(room, payload) {
+  clients.forEach(ws => {
+    const meta = clientMeta.get(ws)
     if (meta && meta.room === room) {
-      roomClients.push(client)
-    }
-  })
-  return roomClients
-}
-
-function broadcastRoom(room, payload, exceptClient = null) {
-  getRoomClients(room).forEach(client => {
-    if (client !== exceptClient) {
-      sendToClient(client, payload)
+      sendToClient(ws, payload)
     }
   })
 }
 
 function getUserList(room) {
-  const userMap = new Map()
-
-  getRoomClients(room).forEach(client => {
-    const meta = clientMeta.get(client)
-    if (!meta) return
-
-    const userId = meta.userId || meta.clientId
-    if (!userMap.has(userId)) {
-      userMap.set(userId, {
-        userId,
-        user: meta.user || "Guest",
-        avatar: meta.avatar || "🙂"
+  const users = []
+  clients.forEach(ws => {
+    const meta = clientMeta.get(ws)
+    if (meta && meta.room === room) {
+      users.push({
+        user: meta.user,
+        avatar: meta.avatar,
+        userId: meta.userId
       })
     }
   })
-
-  return Array.from(userMap.values())
+  return users
 }
 
-function broadcastUserList(room) {
+function updateRoomState(room) {
   if (!room) return
 
   const users = getUserList(room)
@@ -213,159 +185,84 @@ async function sendToLeader(data, options = {}) {
       )
       return res.data
     } catch (err) {
-      console.log("⚠️ Leader failed, retrying...")
+      // If leader check failed during request or leader stepped down
       await sleep(pollIntervalMs)
     }
   }
 
-  console.log("❌ No leader available after retry window")
-  return { success: false, error: "No leader available" }
-}
-
-function normalizeDrawMessage(raw, meta) {
-  if (!raw || typeof raw !== "object") return null
-
-  if (raw.type === "draw" && raw.data) {
-    return {
-      type: "draw",
-      room: raw.room || meta.room,
-      eventId: raw.eventId,
-      user: raw.user || meta.user,
-      avatar: raw.avatar || meta.avatar,
-      userId: raw.userId || meta.userId,
-      data: raw.data
-    }
-  }
-
-  if (typeof raw.x === "number" && typeof raw.y === "number") {
-    return {
-      type: "draw",
-      room: raw.room || meta.room,
-      eventId: raw.eventId,
-      user: raw.user || meta.user,
-      avatar: raw.avatar || meta.avatar,
-      userId: raw.userId || meta.userId,
-      data: {
-        x: raw.x,
-        y: raw.y,
-        lastX: raw.lastX,
-        lastY: raw.lastY,
-        size: raw.size,
-        color: raw.color,
-        points: raw.points
-      }
-    }
-  }
-
-  return null
-}
-
-function operationNeedsRaft(type) {
-  return ["draw", "clear", "undo", "redo", "ai-draw"].includes(type)
-}
-
-function getMessageType(data) {
-  if (!data || typeof data !== "object") return null
-  if (typeof data.type === "string") return data.type
-  if (typeof data.x === "number" && typeof data.y === "number") return "draw"
-  return null
+  return { success: false, error: "Leader timeout" }
 }
 
 // -----------------------------
-// WebSocket Connection
+// Drawing Normalizer
 // -----------------------------
-wss.on("connection", (ws) => {
-  console.log("🟢 Client connected")
+function normalizeDrawMessage(data, meta) {
+  return {
+    type: "draw",
+    eventId: data.eventId || meta.eventId || `evt-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+    room: data.room || meta.room,
+    user: data.user || meta.user,
+    avatar: data.avatar || meta.avatar,
+    userId: data.userId || meta.userId,
+    data: {
+      points: data.points || (data.data && data.data.points),
+      color: data.color || (data.data && data.data.color),
+      size: data.size || (data.data && data.data.size)
+    }
+  }
+}
 
-  ws.isAlive = true
-  ws.on("pong", () => {
-    ws.isAlive = true
-  })
-
+// -----------------------------
+// WebSocket Logic
+// -----------------------------
+wss.on("connection", (ws, req) => {
   clients.add(ws)
-  const clientId = crypto.randomUUID()
-  clientMeta.set(ws, {
-    clientId,
-    userId: clientId,
-    room: null,
-    user: "Guest",
-    avatar: "🙂"
-  })
+  console.log(`[Gateway] New connection. Total clients: ${clients.size}`)
 
-  sendToClient(ws, { type: "welcome", clientId })
-  broadcastRoomStats()
-
-  ws.on("message", async (message) => {
+  ws.on("message", async (msg) => {
     try {
-      const data = JSON.parse(message)
+      const payload = JSON.parse(msg)
+      const opType = payload.type
       const meta = clientMeta.get(ws) || {}
-      const messageType = getMessageType(data)
+      const room = payload.room || meta.room
 
-      if (messageType === "join") {
-        const nextMeta = {
-          ...meta,
-          room: typeof data.room === "string" ? data.room : null,
-          user: typeof data.user === "string" ? data.user : "Guest",
-          avatar: typeof data.avatar === "string" ? data.avatar : "🙂",
-          userId: typeof data.userId === "string" ? data.userId : meta.userId
-        }
-        clientMeta.set(ws, nextMeta)
-
-        if (nextMeta.room) {
-          sendInitialState(ws, nextMeta.room);
-          broadcastUserList(nextMeta.room)
-        }
-        broadcastRoomStats()
-        return
-      }
-
-      if (messageType === "rtc-signal") {
-        const room = data.room || meta.room
-        const targetId = data.target
-        if (!room || !targetId || !data.signal) return
-
-        getRoomClients(room).forEach(client => {
-          const targetMeta = clientMeta.get(client)
-          if (targetMeta && targetMeta.userId === targetId) {
-            sendToClient(client, {
-              type: "rtc-signal",
-              room,
-              from: meta.userId,
-              signal: data.signal
-            })
-          }
+      if (opType === "join") {
+        clientMeta.set(ws, {
+          user: payload.user,
+          avatar: payload.avatar,
+          room: payload.room,
+          userId: payload.userId || `usr-${Date.now()}`
         })
+        console.log(`[Gateway] User ${payload.user} joined room ${payload.room}`)
+        updateRoomState(payload.room)
+        broadcastRoomStats()
+        
+        // Fetch and send initial state history
+        await sendInitialState(ws, payload.room)
         return
       }
 
-      // Cursor updates are ephemeral and do not need RAFT persistence.
-      if (messageType === "cursor") {
-        const room = data.room || meta.room
-        if (!room) return
-
-        broadcastRoom(room, {
-          type: "cursor",
-          room,
-          user: data.user || meta.user,
-          avatar: data.avatar || meta.avatar,
-          userId: data.userId || meta.userId,
-          x: data.x,
-          y: data.y
-        }, ws)
-        return
-      }
-
-      const opType = messageType
-      if (!opType) return
-
-      if (!operationNeedsRaft(opType)) return
-
-      const room = data.room || meta.room
       if (!room) return
 
+      // Handle RTC signalling (No RAFT required for this)
+      if (opType === "rtc-signal") {
+        broadcastRoom(room, payload)
+        return
+      }
+
+      // Handle Cursor positions (No RAFT required for this)
+      if (opType === "cursor") {
+        broadcastRoom(room, payload)
+        return
+      }
+
+      // -------------------------------
+      // RAFT-COMMITTED OPERATIONS
+      // -------------------------------
+      // Prepare RAFT message
+      const data = payload
       const baseEvent = {
-        room,
-        eventId: data.eventId,
+        eventId: data.eventId || `evt-${Date.now()}`,
         user: data.user || meta.user,
         avatar: data.avatar || meta.avatar,
         userId: data.userId || meta.userId
@@ -422,84 +319,34 @@ wss.on("connection", (ws) => {
           data: data.data
         })
       }
+
     } catch (err) {
-      console.log("Error handling message:", err.message)
+      console.error("[Gateway] Message error:", err.message)
     }
   })
 
   ws.on("close", () => {
-    console.log("🔴 Client disconnected")
-    removeClient(ws, "socket close")
-  })
-
-  ws.on("error", () => {
-    removeClient(ws, "socket error")
-  })
-})
-
-const wsHeartbeatTimer = setInterval(() => {
-  clients.forEach(client => {
-    if (client.isAlive === false) {
-      removeClient(client, "heartbeat timeout")
-      client.terminate()
-      return
+    const meta = clientMeta.get(ws)
+    clients.delete(ws)
+    clientMeta.delete(ws)
+    if (meta && meta.room) {
+      updateRoomState(meta.room)
     }
-
-    client.isAlive = false
-    try {
-      client.ping()
-    } catch {
-      removeClient(client, "heartbeat ping failure")
-      client.terminate()
-    }
+    broadcastRoomStats()
+    console.log(`[Gateway] Connection closed. Total clients: ${clients.size}`)
   })
-}, 15000)
-
-wss.on("close", () => {
-  clearInterval(wsHeartbeatTimer)
 })
 
-// -----------------------------
-// Static frontend
-// -----------------------------
-app.use(express.static(path.join(__dirname, "frontend")))
-
-app.get("/", (req, res) => {
-  res
-    .status(200)
-    .type("html")
-    .send(`<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Mini-RAFT Gateway</title>
-  <style>
-    body { font-family: Arial, sans-serif; margin: 0; padding: 40px; background: #0f172a; color: #e2e8f0; }
-    .card { max-width: 720px; margin: 0 auto; background: #111827; border: 1px solid #334155; border-radius: 16px; padding: 28px; }
-    a { color: #38bdf8; }
-    code { background: #1e293b; padding: 2px 6px; border-radius: 6px; }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>Mini-RAFT Gateway</h1>
-    <p>This service is a WebSocket gateway, not the main app page.</p>
-    <p>Open the frontend here: <a href="https://raft-frontend.onrender.com">https://raft-frontend.onrender.com</a></p>
-    <p>Health check: <code>/health</code></p>
-  </div>
-</body>
-</html>`)
+// HTTP Status endpoint
+app.get("/status", (req, res) => {
+  res.json({
+    status: "ok",
+    clients: clients.size,
+    rooms: Array.from(new Set(Array.from(clientMeta.values()).map(m => m.room)))
+  })
 })
 
-// -----------------------------
-// Health check
-// -----------------------------
-app.get("/health", (req, res) => {
-  res.send("OK")
-})
-
-// -----------------------------
 server.listen(PORT, () => {
-  console.log(`Gateway running on ${PORT}`)
+  console.log(`[Gateway] RAFT Gateway listening on port ${PORT}`)
+  console.log(`[Gateway] Replicas configured: ${replicaUrls.join(", ")}`)
 })

@@ -12,9 +12,9 @@ const peersEnv = process.env.REPLICA_PEERS || process.env.PEERS
 const peerUrls = peersEnv
   ? peersEnv.split(",").map(url => url.trim()).filter(Boolean)
   : [
-    "http://localhost:5001",
-    "http://localhost:5002",
-    "http://localhost:5003"
+    "http://node1:5001",
+    "http://node2:5002",
+    "http://node3:5003"
   ]
 
 const peers = peerUrls.filter(peerUrl => !peerUrl.endsWith(`:${PORT}`))
