@@ -18,14 +18,17 @@ const generateUUID = () => {
   });
 };
 
-const isLocalHost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+const isLocalHost = window.location.hostname === "localhost" || 
+                   window.location.hostname === "127.0.0.1" || 
+                   window.location.protocol === "file:";
 
 // Priority: Localhost -> Railway -> Render (Fallback)
 let WS_URL = "wss://raft-gateway-production.up.railway.app" 
 
 if (isLocalHost) {
-  WS_URL = `ws://${window.location.hostname}:3000`
-} 
+  // Use port 3000 for the local Docker Gateway
+  WS_URL = `ws://localhost:3000`
+}
 
 const loginOverlay = document.getElementById("loginOverlay")
 const appShell = document.getElementById("appShell")

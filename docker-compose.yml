@@ -10,6 +10,7 @@ services:
       - "3000:3000"
     volumes:
       - ./gateway:/app
+      - /app/node_modules # Protect node_modules from being hidden by the mount
     networks:
       - raft-net
 
@@ -23,6 +24,7 @@ services:
       - "5001:5001"
     volumes:
       - ./replica1:/app
+      - /app/node_modules # Protect node_modules from being hidden by the mount
     command: ["nodemon", "--legacy-watch", "replica.js"]
     networks:
       - raft-net
@@ -37,6 +39,7 @@ services:
       - "5002:5002"
     volumes:
       - ./replica2:/app
+      - /app/node_modules # Protect node_modules from being hidden by the mount
     command: ["nodemon", "--legacy-watch", "replica.js"]
     networks:
       - raft-net
@@ -51,6 +54,7 @@ services:
       - "5003:5003"
     volumes:
       - ./replica3:/app
+      - /app/node_modules # Protect node_modules from being hidden by the mount
     command: ["nodemon", "--legacy-watch", "replica.js"]
     networks:
       - raft-net
