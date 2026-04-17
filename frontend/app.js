@@ -162,6 +162,7 @@ function pushDebugLog(message) {
   if (state.debug.logs.length > 24) {
     state.debug.logs.length = 24
   }
+  renderDebugPanel(); // Fix: Ensure panel updates when log is added
 }
 
 function renderDebugPanel() {
