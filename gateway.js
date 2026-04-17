@@ -115,10 +115,10 @@ app.get("/health", async (req, res) => {
   const leader = await getLeader();
   const replicaStatus = await Promise.all(replicaUrls.map(async url => {
     try {
-      const s = await axios.get(`${url}/log-state`, { timeout: 500 });
+      const s = await axios.get(`${url}/log-state`, { timeout: 3000 });
       return { url, online: true, ...s.data };
     } catch (e) {
-      return { url, online: false };
+      return { url, online: false, error: e.message, code: e.code };
     }
   }));
 

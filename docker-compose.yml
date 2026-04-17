@@ -6,6 +6,8 @@ services:
       REPLICA_ID: node1
       PORT: 5001
       PEERS: http://node1:5001,http://node2:5002,http://node3:5003
+    ports:
+      - "5001:5001"
     command: ["node", "replica.js"]
     networks:
       - mini-raft-net
@@ -16,6 +18,8 @@ services:
       REPLICA_ID: node2
       PORT: 5002
       PEERS: http://node1:5001,http://node2:5002,http://node3:5003
+    ports:
+      - "5002:5002"
     command: ["node", "replica.js"]
     networks:
       - mini-raft-net
@@ -26,6 +30,8 @@ services:
       REPLICA_ID: node3
       PORT: 5003
       PEERS: http://node1:5001,http://node2:5002,http://node3:5003
+    ports:
+      - "5003:5003"
     command: ["node", "replica.js"]
     networks:
       - mini-raft-net
@@ -35,6 +41,8 @@ services:
     environment:
       PORT: 3000
       REPLICA_URLS: http://node1:5001,http://node2:5002,http://node3:5003
+    ports:
+      - "3000:3000"
     command: ["node", "gateway.js"]
     depends_on:
       - node1
