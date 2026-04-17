@@ -994,12 +994,24 @@ function boot(session) {
   }
 }
 
-initAuth({
-  loginOverlay,
-  appShell,
-  loginForm,
-  usernameInput,
-  avatarInput,
-  roomInput,
-  onReady: boot
-})
+document.addEventListener("DOMContentLoaded", () => {
+  console.log("Mini-RAFT app.js loaded and DOM ready");
+  
+  try {
+    initAuth({
+      loginOverlay,
+      appShell,
+      loginForm,
+      usernameInput,
+      avatarInput,
+      roomInput,
+      onReady: (session) => {
+        console.log("Login authorized, booting app...");
+        boot(session);
+      }
+    });
+    console.log("Auth initialized");
+  } catch (err) {
+    console.error("Auth initialization failed:", err);
+  }
+});
