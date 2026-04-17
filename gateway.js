@@ -129,7 +129,7 @@ function broadcastRoomStats() {
 async function getLeader() {
   for (let replicaUrl of replicaUrls) {
     try {
-      const res = await axios.get(`${replicaUrl}/log-state`, { timeout: 500 })
+      const res = await axios.get(`${replicaUrl}/log-state`, { timeout: 800 })
       if (res.data.state === "leader") {
         return replicaUrl
       }
@@ -137,6 +137,26 @@ async function getLeader() {
   }
   return null
 }
+
+// Global health status for debugging
+app.get("/health", async (req, res) => {
+  const leader = await getLeader();
+  const replicaStatus = await Promise.all(replicaUrls.map(async url => {
+    try {
+      const s = await axios.get(`${url}/log-state`, { timeout: 500 });
+      return { url, online: true, ...s.data };
+    } catch (e) {
+      return { url, online: false };
+    }
+  }));
+
+  res.json({
+    gateway: "online",
+    clients: clients.size,
+    leader: leader || "none",
+    replicas: replicaStatus
+  });
+});
 
 async function sendInitialState(ws, room = null) {
   try {
@@ -173,8 +193,8 @@ async function sendInitialState(ws, room = null) {
 // Send entry to leader
 // -----------------------------
 async function sendToLeader(data, options = {}) {
-  const leaderTimeoutMs = Number(options.leaderTimeoutMs) > 0 ? Number(options.leaderTimeoutMs) : 15000
-  const pollIntervalMs = 250
+  const leaderTimeoutMs = Number(options.leaderTimeoutMs) > 0 ? Number(options.leaderTimeoutMs) : 5000 // Increased default
+  const pollIntervalMs = 300
   const startedAt = Date.now()
 
   while (Date.now() - startedAt < leaderTimeoutMs) {
