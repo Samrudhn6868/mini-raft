@@ -1,0 +1,9 @@
+{
+  "version": 2,
+  "name": "mini-raft-frontend",
+  "cleanUrls": true,
+  "framework": null,
+  "buildCommand": null,
+  "installCommand": "npm install",
+  "outputDirectory": "."
+}

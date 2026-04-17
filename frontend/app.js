@@ -1,10 +1,14 @@
 import { initAuth } from "./auth.js"
 import { RTCMesh } from "./rtc.js"
 
-const WS_URL =
-  window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
-    ? "ws://localhost:4000"
-    : "wss://raft-gateway.onrender.com"
+const isLocalHost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+
+// Priority: Localhost -> Railway -> Render (Fallback)
+let WS_URL = "wss://raft-gateway-production.up.railway.app" 
+
+if (isLocalHost) {
+  WS_URL = `ws://${window.location.hostname}:3000`
+} 
 
 const loginOverlay = document.getElementById("loginOverlay")
 const appShell = document.getElementById("appShell")
@@ -180,6 +184,204 @@ function resizeCanvas() {
   ctx.shadowColor = "rgba(110, 231, 255, 0.24)"
 
   redrawCanvas()
+}
+
+function pointFromEvent(event) {
+  const rect = canvas.getBoundingClientRect()
+  return {
+    x: event.clientX - rect.left,
+    y: event.clientY - rect.top
+  }
+}
+
+function snapPoint(point) {
+  if (!state.snapToGrid) return point
+  const grid = 16
+  return {
+    x: Math.round(point.x / grid) * grid,
+    y: Math.round(point.y / grid) * grid
+  }
+}
+
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y)
+}
+
+function pointToLineDistance(p, a, b) {
+  const lineLength = dist(a, b)
+  if (lineLength === 0) return dist(p, a)
+
+  const t = ((p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y)) / (lineLength * lineLength)
+  const clamped = Math.max(0, Math.min(1, t))
+  const projection = {
+    x: a.x + clamped * (b.x - a.x),
+    y: a.y + clamped * (b.y - a.y)
+  }
+  return dist(p, projection)
+}
+
+function circleFromPoints(points) {
+  const center = points.reduce((acc, p) => ({ x: acc.x + p.x, y: acc.y + p.y }), { x: 0, y: 0 })
+
+  center.x /= points.length
+  center.y /= points.length
+
+  const distances = points.map(p => dist(p, center))
+  const radius = distances.reduce((a, b) => a + b, 0) / distances.length
+  const variance = distances.reduce((acc, d) => acc + Math.pow(d - radius, 2), 0) / distances.length
+
+  return { center, radius, variance }
+}
+
+function connectSocketLegacy() {
+  const tryConnect = () => {
+    const wsUrl = WS_URL
+    if (!wsUrl) return
+
+    const socket = new WebSocket(wsUrl)
+    let opened = false
+    let handledPreOpenFailure = false
+
+    updateDebug({ wsState: "connecting" })
+    pushDebugLog(`WS connecting: ${wsUrl}`)
+
+    socket.addEventListener("open", () => {
+      opened = true
+      state.ws = socket
+      updateDebug({ wsState: "open" })
+      pushDebugLog("WS open")
+      setStatus(true)
+      showToast("Back online. Sync restored.", "connected", 1300)
+      sendWs(wsEnvelope({ type: "join" }))
+
+      if (state.rtc) {
+        state.rtc.close()
+      }
+
+      state.rtc = new RTCMesh({
+        selfId: state.selfId,
+        room: state.session.room,
+        wsSignalSend: payload => {
+          const kind = payload.signal && payload.signal.kind
+          if (kind && state.debug.rtcSignalsOut[kind] !== undefined) {
+            state.debug.rtcSignalsOut[kind] += 1
+          }
+          pushDebugLog(`RTC signal out: ${kind || "unknown"}`)
+          renderDebugPanel()
+          sendWs(wsEnvelope({ type: "rtc-signal", ...payload }))
+        },
+        onData: packet => {
+          if (!packet || packet.type !== "rtc-draw" || packet.room !== state.session.room) return
+          pushDebugLog("RTC data in: rtc-draw")
+          renderDebugPanel()
+          handleIncomingOperation(packet.payload, "rtc")
+        },
+        onPeerStateChange: ({ peerId, state: peerState }) => {
+          state.debug.peerState = peerState
+          pushDebugLog(`Peer ${peerId.slice(0, 6)} state: ${peerState}`)
+          renderDebugPanel()
+          if (peerState === "failed") {
+            showToast("Peer optimization failed. Using server sync.", "warning", 1400)
+          }
+        }
+      })
+    })
+
+    socket.addEventListener("close", () => {
+      updateDebug({ wsState: "closed" })
+      pushDebugLog("WS closed")
+      setStatus(false)
+      showToast("Connection lost. Reconnecting...", "warning")
+      scheduleReconnect()
+    })
+
+    socket.addEventListener("error", () => {
+      if (!opened) return
+      updateDebug({ wsState: "error" })
+      pushDebugLog("WS error")
+      setStatus(false)
+      showToast("Network error. Retrying shortly...", "warning")
+    })
+
+    socket.addEventListener("message", async event => {
+      try {
+        const payload = JSON.parse(event.data)
+        state.debug.wsIn += 1
+        pushDebugLog(`WS <- ${payload.type || "unknown"}`)
+        renderDebugPanel()
+
+        if (payload.type === "welcome" && payload.clientId) {
+          const changed = state.selfId !== payload.clientId
+          state.selfId = payload.clientId
+          if (changed) {
+            renderIdentity()
+            sendWs(wsEnvelope({ type: "join" }))
+            if (state.rtc) {
+              state.rtc.setContext({ selfId: state.selfId, room: state.session.room })
+            }
+          }
+          return
+        }
+
+        if (payload.type === "user-list") {
+          renderUsers(payload.users || [])
+          return
+        }
+
+        if (payload.type === "room-stats") {
+          renderRooms(payload.rooms || [])
+          return
+        }
+
+        if (payload.type === "rtc-signal") {
+          const kind = payload.signal && payload.signal.kind
+          if (kind && state.debug.rtcSignalsIn[kind] !== undefined) {
+            state.debug.rtcSignalsIn[kind] += 1
+          }
+          pushDebugLog(`RTC signal in: ${kind || "unknown"}`)
+          renderDebugPanel()
+          if (state.rtc) {
+            await state.rtc.handleSignal(payload)
+          }
+          return
+        }
+
+        if (payload.type === "cursor") {
+          handleCursor(payload)
+          return
+        }
+
+        if (payload.type === "INIT_STATE") {
+          console.log("Loading initial state", payload.entries.length);
+          
+          // Clear local state before applying initial state
+          state.history = [];
+          state.redoStack = [];
+          state.seenEvents.clear();
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+          for (const entry of payload.entries) {
+            if (entry && entry.data) {
+              handleIncomingOperation(entry.data, "initial");
+            }
+          }
+          return
+        }
+
+        if (["draw", "clear", "undo", "redo"].includes(payload.type)) {
+          if (payload.type === "draw") {
+            handleRemoteDrawMessage(payload)
+            return
+          }
+          handleIncomingOperation(payload, "ws")
+        }
+      } catch {
+        // Ignore malformed messages.
+      }
+    })
+  }
+
+  tryConnect()
 }
 
 function pointFromEvent(event) {

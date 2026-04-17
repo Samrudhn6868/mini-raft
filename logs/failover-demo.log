@@ -1,0 +1,7 @@
+[PASS] Cluster readiness - gateway and 3 replicas responded
+[PASS] Leader detection - leader=5001 term=1
+[PASS] Initial drawing consistency - received 12 identical strokes on 3 clients
+[failover] killing leader 5001
+[failover] new leader 5002 elected in 1949ms
+[PASS] Failover - leader 5001 -> 5002 in 1949ms
+[PASS] Post-failover consistency - post-failover strokes accepted by leader 5002
