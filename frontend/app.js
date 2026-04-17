@@ -714,11 +714,13 @@ function boot(session) {
   } catch (err) { alert(`Boot failure: ${err.message}`); }
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  try {
-    initAuth({
-      loginOverlay, appShell, loginForm, usernameInput, avatarInput, roomInput,
-      onReady: boot
-    });
-  } catch (err) { console.error("Auth boot failed", err); }
-});
+try {
+  console.log("Mini-RAFT initializing auth...");
+  initAuth({
+    loginOverlay, appShell, loginForm, usernameInput, avatarInput, roomInput,
+    onReady: boot
+  });
+  console.log("Auth initialized");
+} catch (err) {
+  console.error("Auth boot failed", err);
+}
