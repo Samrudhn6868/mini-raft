@@ -1,13 +1,60 @@
-# Mini-RAFT Mono-Cluster: One Container, Full RAFT Cluster
+# Mini-RAFT Assignment Compliant Stack
 services:
   gateway:
-    build: .
+    build: ./gateway
     environment:
-      PORT: 3000
-      NODE_ENV: production
+      - PORT=3000
+      - REPLICA_URLS=http://replica1:5001,http://replica2:5002,http://replica3:5003
+      - IS_DOCKER_COMPOSE=true
     ports:
       - "3000:3000"
-    restart: always
+    volumes:
+      - ./gateway:/app
+    networks:
+      - raft-net
 
-# No more node1, node2, node3 services. 
-# The gateway container spawns them internally on localhost.
+  replica1:
+    build: ./replica1
+    environment:
+      - PORT=5001
+      - REPLICA_ID=node1
+      - PEERS=http://replica1:5001,http://replica2:5002,http://replica3:5003
+    ports:
+      - "5001:5001"
+    volumes:
+      - ./replica1:/app
+    command: ["nodemon", "--legacy-watch", "replica.js"]
+    networks:
+      - raft-net
+
+  replica2:
+    build: ./replica2
+    environment:
+      - PORT=5002
+      - REPLICA_ID=node2
+      - PEERS=http://replica1:5001,http://replica2:5002,http://replica3:5003
+    ports:
+      - "5002:5002"
+    volumes:
+      - ./replica2:/app
+    command: ["nodemon", "--legacy-watch", "replica.js"]
+    networks:
+      - raft-net
+
+  replica3:
+    build: ./replica3
+    environment:
+      - PORT=5003
+      - REPLICA_ID=node3
+      - PEERS=http://replica1:5001,http://replica2:5002,http://replica3:5003
+    ports:
+      - "5003:5003"
+    volumes:
+      - ./replica3:/app
+    command: ["nodemon", "--legacy-watch", "replica.js"]
+    networks:
+      - raft-net
+
+networks:
+  raft-net:
+    driver: bridge

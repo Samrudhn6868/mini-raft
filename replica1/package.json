@@ -1,0 +1,20 @@
+{
+  "name": "mini-raft",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "npm run dev:all",
+    "test": "node test-suite.js",
+    "cluster": "node start-cluster.js",
+    "gateway": "node gateway.js",
+    "dev:all": "concurrently \"node start-cluster.js --no-tests\" \"node gateway.js\""
+  },
+  "dependencies": {
+    "axios": "^1.15.0",
+    "concurrently": "^9.2.1",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "ws": "^8.20.0"
+  }
+}
