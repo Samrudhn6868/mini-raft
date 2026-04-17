@@ -17,7 +17,7 @@ const wss = new WebSocket.Server({ server })
 const PORT = process.env.PORT || 4000
 const replicaUrls = (process.env.REPLICA_URLS 
   ? process.env.REPLICA_URLS.split(",") 
-  : ["http://localhost:5001", "http://localhost:5002", "http://localhost:5003"])
+  : ["http://127.0.0.1:5001", "http://127.0.0.1:5002", "http://127.0.0.1:5003"])
 
 // Mono-Cluster Fallback: If not running in Docker-Compose, spawn replicas locally
 if (process.env.IS_DOCKER_COMPOSE !== "true" && process.env.SKIP_CLUSTER_SPAWN !== "true") {

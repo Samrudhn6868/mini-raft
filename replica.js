@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 5001
 const ID = process.env.REPLICA_ID || `node-${PORT}`
 const peerUrls = (process.env.PEERS 
   ? process.env.PEERS.split(",") 
-  : ["http://localhost:5001", "http://localhost:5002", "http://localhost:5003"])
+  : ["http://127.0.0.1:5001", "http://127.0.0.1:5002", "http://127.0.0.1:5003"])
 
 const peers = peerUrls.filter(url => !url.includes(`:${PORT}`))
 
@@ -97,4 +97,4 @@ app.get("/sync-log", (req, res) => {
 app.get("/committed-log", (req, res) => res.json({ entries: log }))
 app.get("/log-state", (req, res) => res.json({ id: ID, state, term: currentTerm, commitIndex }))
 
-app.listen(PORT, () => console.log(`[Replica ${ID}] Listening`))
+app.listen(PORT, "0.0.0.0", () => console.log(`[Replica ${ID}] Listening on 0.0.0.0:${PORT}`))
