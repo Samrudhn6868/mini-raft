@@ -42,7 +42,7 @@ let heartbeatInterval = null
 console.log(`[Replica ${PORT}] Starting node (id=${ID})`)
 setTimeout(() => {
   resetElectionTimer()
-}, Math.random() * 15 + 10)
+}, 1000) // Give node time to stabilize before first election
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
@@ -72,8 +72,8 @@ function resetElectionTimer() {
   clearTimeout(electionTimeout)
   electionTimeout = null
 
-  const portOffset = Math.max(0, portNumber - 5001) * 1500
-  const timeout = 250 + portOffset + Math.random() * 100
+  const portOffset = Math.max(0, portNumber - 5001) * 3000
+  const timeout = 1500 + portOffset + Math.random() * 500
   console.log(`[Replica ${PORT}][Term ${currentTerm}] Election timer set: ${timeout.toFixed(0)}ms`)
 
   electionTimeout = setTimeout(async () => {
@@ -226,7 +226,7 @@ function advanceCommitIndex() {
 
 function startHeartbeat() {
   if (heartbeatInterval) clearInterval(heartbeatInterval)
-  const heartbeatDelay = 50
+  const heartbeatDelay = 150 // Relaxed from 50ms to 150ms for cloud stability
 
   console.log(`[Replica ${PORT}][Term ${currentTerm}] Starting heartbeat every ${heartbeatDelay}ms`)
 
