@@ -112,6 +112,14 @@ function hasSeen(id) {
   return Boolean(id && state.seenEvents.has(id))
 }
 
+function normalizeIncomingPayload(payload) {
+  if (payload && typeof payload === "object" && payload.payload && typeof payload.payload === "object") {
+    return payload.payload
+  }
+
+  return payload
+}
+
 function storageKey(kind) {
   return `drawing:${state.session.room}:${kind}`
 }
@@ -387,7 +395,11 @@ function broadcastOperation(operation) {
     markSeen(operation.eventId)
   }
   state.debug.drawViaWs += 1
-  sendWs(wsEnvelope(operation))
+  const envelope = wsEnvelope(operation)
+  sendWs(envelope)
+  if (state.rtc) {
+    state.rtc.broadcast(envelope)
+  }
   renderDebugPanel()
 }
 
@@ -577,6 +589,7 @@ function scheduleReconnect() {
 }
 
 function handleIncomingOperation(payload, source = "ws") {
+  payload = normalizeIncomingPayload(payload)
   if (!payload || !state.session || payload.room !== state.session.room) return
   const eventId = payload.eventId || (payload.data && payload.data.id);
   if (!eventId || hasSeen(eventId)) return
@@ -604,7 +617,7 @@ function connectSocket() {
       selfId: state.selfId,
       room: state.session.room,
       wsSignalSend: payload => sendWs(wsEnvelope({ type: "rtc-signal", ...payload })),
-      onData: packet => handleIncomingOperation(packet.payload, "rtc"),
+      onData: packet => handleIncomingOperation(packet, "rtc"),
       onPeerStateChange: ({ peerId, state: ps }) => {
         state.debug.peerState = ps
         renderDebugPanel()

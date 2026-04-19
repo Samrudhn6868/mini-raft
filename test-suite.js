@@ -290,7 +290,7 @@ function startReplica(port) {
     NODE_BIN,
     [path.join(ROOT, "replica.js"), String(port)],
     {
-      REPLICA_PEERS: peers
+      PEERS: peers
     }
   )
 }
@@ -303,7 +303,8 @@ function startGateway() {
     [path.join(ROOT, "gateway.js")],
     {
       PORT: String(CONFIG.gatewayPort),
-      REPLICA_URLS: replicaUrls
+      REPLICA_URLS: replicaUrls,
+      SKIP_CLUSTER_SPAWN: "true"
     }
   )
 }

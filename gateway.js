@@ -37,6 +37,51 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 const clients = new Set()
 const clientMeta = new Map()
 
+function safeSend(ws, payload) {
+  if (ws.readyState !== WebSocket.OPEN) return
+  ws.send(JSON.stringify(payload))
+}
+
+function buildRoomUsers(room) {
+  const users = []
+  clients.forEach(client => {
+    const meta = clientMeta.get(client)
+    if (!meta || meta.room !== room) return
+    users.push({
+      userId: meta.userId,
+      user: meta.user || "Guest",
+      avatar: meta.avatar || ":)"
+    })
+  })
+  return users
+}
+
+function buildRoomStats() {
+  const counts = new Map()
+  clients.forEach(client => {
+    const meta = clientMeta.get(client)
+    if (!meta || !meta.room) return
+    counts.set(meta.room, (counts.get(meta.room) || 0) + 1)
+  })
+
+  return [...counts.entries()].map(([room, count]) => ({ room, count }))
+}
+
+function broadcastRoomStats() {
+  const rooms = buildRoomStats()
+  clients.forEach(client => safeSend(client, { type: "room-stats", rooms }))
+}
+
+function broadcastUserList(room) {
+  if (!room) return
+  const users = buildRoomUsers(room)
+  clients.forEach(client => {
+    const meta = clientMeta.get(client)
+    if (!meta || meta.room !== room) return
+    safeSend(client, { type: "user-list", users })
+  })
+}
+
 async function getLeader() {
   for (let url of replicaUrls) {
     try {
@@ -84,6 +129,9 @@ async function sendToLeader(data) {
 
 wss.on("connection", (ws) => {
   clients.add(ws)
+  const generatedId = `usr-${Date.now()}-${Math.floor(Math.random() * 10000)}`
+  safeSend(ws, { type: "welcome", clientId: generatedId })
+
   ws.on("message", async (msg) => {
     try {
       const payload = JSON.parse(msg)
@@ -91,21 +139,65 @@ wss.on("connection", (ws) => {
       const room = payload.room || meta.room
 
       if (payload.type === "join") {
-        clientMeta.set(ws, { ...payload, userId: payload.userId || `usr-${Date.now()}` })
-        await sendInitialState(ws, payload.room); return
+        const userId = payload.userId || meta.userId || generatedId
+        clientMeta.set(ws, {
+          ...meta,
+          ...payload,
+          room: payload.room,
+          userId,
+          user: payload.user || meta.user || "Guest",
+          avatar: payload.avatar || meta.avatar || ":)"
+        })
+        await sendInitialState(ws, payload.room)
+        broadcastUserList(payload.room)
+        broadcastRoomStats()
+        return
       }
       if (!room) return
-      if (payload.type === "rtc-signal" || payload.type === "cursor") {
-        clients.forEach(c => { if (clientMeta.get(c)?.room === room && c !== ws) c.send(msg); }); return;
+
+      if (payload.type === "rtc-signal") {
+        if (payload.target) {
+          clients.forEach(c => {
+            const cm = clientMeta.get(c)
+            if (!cm || cm.room !== room || cm.userId !== payload.target || c === ws) return
+            safeSend(c, {
+              type: "rtc-signal",
+              room,
+              from: meta.userId,
+              target: payload.target,
+              signal: payload.signal
+            })
+          })
+        }
+        return
+      }
+
+      if (payload.type === "cursor") {
+        clients.forEach(c => {
+          if (clientMeta.get(c)?.room === room && c !== ws) {
+            safeSend(c, payload)
+          }
+        })
+        return
       }
 
       const result = await sendToLeader(payload)
       if (result?.success) {
-        clients.forEach(c => { if (clientMeta.get(c)?.room === room) c.send(msg); });
+        clients.forEach(c => {
+          if (clientMeta.get(c)?.room === room) {
+            safeSend(c, payload)
+          }
+        })
       }
     } catch (err) {}
   })
-  ws.on("close", () => { clients.delete(ws); clientMeta.delete(ws); })
+  ws.on("close", () => {
+    const room = clientMeta.get(ws)?.room
+    clients.delete(ws)
+    clientMeta.delete(ws)
+    broadcastUserList(room)
+    broadcastRoomStats()
+  })
 })
 
 server.listen(PORT, () => console.log(`[Gateway] Listening on ${PORT}`))
