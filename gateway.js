@@ -17,16 +17,16 @@ const wss = new WebSocket.Server({ server })
 const PORT = process.env.PORT || 4000
 const replicaUrls = (process.env.REPLICA_URLS 
   ? process.env.REPLICA_URLS.split(",") 
-  : ["http://127.0.0.1:5001", "http://127.0.0.1:5002", "http://127.0.0.1:5003"])
+  : ["http://localhost:5001", "http://localhost:5002", "http://localhost:5003"])
 
 // Mono-Cluster Fallback: If not running in Docker-Compose, spawn replicas locally
 if (process.env.IS_DOCKER_COMPOSE !== "true" && process.env.SKIP_CLUSTER_SPAWN !== "true") {
   console.log("[Gateway] Local Mode: Spawning internal RAFT cluster...");
   [5001, 5002, 5003].forEach(port => {
-    const cp = spawn("node", ["replica.js", String(port)], { 
+    const cp = spawn(process.execPath, ["replica.js", String(port)], { 
       cwd: process.cwd(), 
       stdio: "inherit",
-      env: { ...process.env, PORT: undefined } // Ensure inheriting process does NOT override the port if handled by arg
+      env: { ...process.env, PORT: undefined }
     });
     cp.on("error", (err) => console.error(`[Gateway] Failed to spawn replica on ${port}:`, err));
     cp.on("close", (code) => console.log(`[Gateway] Replica on ${port} exited with code ${code}`));
