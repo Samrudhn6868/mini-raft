@@ -23,7 +23,13 @@ const replicaUrls = (process.env.REPLICA_URLS
 if (process.env.IS_DOCKER_COMPOSE !== "true" && process.env.SKIP_CLUSTER_SPAWN !== "true") {
   console.log("[Gateway] Local Mode: Spawning internal RAFT cluster...");
   [5001, 5002, 5003].forEach(port => {
-    spawn("node", ["replica.js", String(port)], { cwd: process.cwd(), stdio: "inherit" });
+    const cp = spawn("node", ["replica.js", String(port)], { 
+      cwd: process.cwd(), 
+      stdio: "inherit",
+      env: { ...process.env, PORT: undefined } // Ensure inheriting process does NOT override the port if handled by arg
+    });
+    cp.on("error", (err) => console.error(`[Gateway] Failed to spawn replica on ${port}:`, err));
+    cp.on("close", (code) => console.log(`[Gateway] Replica on ${port} exited with code ${code}`));
   });
 }
 
