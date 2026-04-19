@@ -5,7 +5,7 @@ const app = express()
 app.use(express.json())
 
 // CONFIG: Support assignment-required environment variables
-const PORT = process.env.PORT || 5001
+const PORT = process.argv[2] || process.env.PORT || 5001
 const ID = process.env.REPLICA_ID || `node-${PORT}`
 const peerUrls = (process.env.PEERS 
   ? process.env.PEERS.split(",") 
