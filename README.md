@@ -51,16 +51,10 @@ To run the full cluster locally:
    ```
 5. Open `frontend/index.html` in your browser.
 
-## 🛠️ Tech Stack
-- **Logic**: Node.js / Express
-- **Networking**: WebSockets / WebSocket-Signal (Custom)
-- **Consensus**: RAFT Algorithm Implementation
-- **Frontend**: Vanilla JS / HTML5 Canvas / CSS3 (Modern Aesthetics)
-- **Deployment**: Vercel (FE) + Railway (BE)
-
-## 🩺 System Health
-Monitor your live cluster at:
-`https://[your-gateway-url].up.railway.app/health`
+## 🩺 System Health & Live Links
+- **Frontend App**: [https://raft-frontend.onrender.com](https://raft-frontend.onrender.com)
+- **Cluster Health**: [https://raft-gateway-production.up.railway.app/health](https://raft-gateway-production.up.railway.app/health)
+- **WebSocket Gateway**: `wss://raft-gateway-production.up.railway.app`
 
 ---
 *Created by Antigravity AI for the Mini-RAFT Project.*
